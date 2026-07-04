@@ -1,0 +1,10 @@
+PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+
+EXT_NAME=coda
+EXT_CONFIG=${PROJ_DIR}extension_config.cmake
+EXT_FLAGS=-DCMAKE_CXX_STANDARD=17
+
+DEFAULT_TEST_EXTENSION_DEPS=httpfs;json;
+
+include extension-ci-tools/makefiles/duckdb_extension.Makefile
+include extension-ci-tools/makefiles/vcpkg.Makefile

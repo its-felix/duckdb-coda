@@ -1,0 +1,16 @@
+# name: test/sql/coda_offline.test
+# description: Offline sanity checks for the Coda extension
+# group: [sql]
+
+require coda
+
+statement ok
+LOAD coda;
+
+statement error
+ATTACH 'dummy-doc' AS coda_missing_token (TYPE coda);
+----
+Coda token not provided
+
+statement ok
+CREATE SECRET coda_offline (TYPE coda, TOKEN 'dummy-token');
