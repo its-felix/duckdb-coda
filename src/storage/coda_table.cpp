@@ -47,14 +47,14 @@ TableFunction
 CodaTableCatalogEntry::GetScanFunction(ClientContext &,
                                        unique_ptr<FunctionData> &bind_data) {
   auto &coda_catalog = catalog.Cast<CodaCatalog>();
-  bind_data = make_uniq<CodaScanBindData>(coda_catalog.DocId(),
-                                          coda_catalog.Token(), table);
+  bind_data = make_uniq<CodaScanBindData>(*this, coda_catalog.DocId(),
+                                          coda_catalog.Token(),
+                                          coda_catalog.APIBase(), table);
   return CodaScanFunction::GetFunction();
 }
 
 TableStorageInfo CodaTableCatalogEntry::GetStorageInfo(ClientContext &) {
-  throw NotImplementedException(
-      "Coda tables do not expose DuckDB storage information");
+  return TableStorageInfo();
 }
 
 virtual_column_map_t CodaTableCatalogEntry::GetVirtualColumns() const {

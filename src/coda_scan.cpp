@@ -6,6 +6,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/function/table_function.hpp"
 
 namespace duckdb {
 
@@ -13,7 +14,7 @@ class CodaScanGlobalState : public GlobalTableFunctionState {
 public:
   CodaScanGlobalState(ClientContext &context, const CodaScanBindData &bind_data,
                       vector<ColumnIndex> column_indexes_p)
-      : client(context, bind_data.doc_id, bind_data.token),
+      : client(context, bind_data.doc_id, bind_data.token, bind_data.api_base),
         table(bind_data.table), column_indexes(std::move(column_indexes_p)) {}
 
   idx_t MaxThreads() const override { return 1; }
@@ -132,11 +133,19 @@ static vector<column_t> CodaScanGetRowIdColumns(ClientContext &,
   return {COLUMN_IDENTIFIER_ROW_ID};
 }
 
+static BindInfo
+CodaScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
+  auto &coda_bind = bind_data->Cast<CodaScanBindData>();
+  return BindInfo(coda_bind.table_entry);
+}
+
 TableFunction CodaScanFunction::GetFunction() {
   TableFunction function("coda_scan", {}, CodaScan, nullptr,
                          CodaScanInitGlobal);
   function.get_virtual_columns = CodaScanGetVirtualColumns;
   function.get_row_id_columns = CodaScanGetRowIdColumns;
+  function.get_bind_info = CodaScanGetBindInfo;
+  function.projection_pushdown = true;
   return function;
 }
 

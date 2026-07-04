@@ -54,6 +54,7 @@ public:
   const vector<CodaTableInfo> &Tables() const { return tables; }
   const string &DocId() const { return doc_id; }
   const string &Token() const { return token; }
+  const string &APIBase() const { return api_base; }
 
 private:
   void LoadCatalog(ClientContext &context);

@@ -21,6 +21,32 @@ static LogicalType CodaLogicalType(const string &format_type, bool is_array) {
   return LogicalType::VARCHAR;
 }
 
+static JSONValue RequireArrayMember(JSONValue value, const string &key,
+                                    const string &context) {
+  auto member = value.GetMember(key);
+  if (!member.IsArray()) {
+    throw InvalidInputException(
+        "Coda API response for %s is missing array member '%s'", context, key);
+  }
+  return member;
+}
+
+static string RequireStringMember(JSONValue value, const string &key,
+                                  const string &context) {
+  auto member = value.GetMember(key);
+  if (!member.IsString()) {
+    throw InvalidInputException(
+        "Coda API response for %s is missing string member '%s'", context, key);
+  }
+  return member.GetString();
+}
+
+static bool OptionalBooleanMember(JSONValue value, const string &key) {
+  auto member = value.GetMember(key);
+  return member.IsValid() && member.GetType() == JSONValueType::BOOLEAN &&
+         member.GetBoolean();
+}
+
 CodaClient::CodaClient(ClientContext &context_p, string doc_id_p,
                        string token_p, string api_base_p)
     : context(context_p), doc_id(std::move(doc_id_p)),
@@ -120,17 +146,18 @@ vector<CodaTableInfo> CodaClient::ListTables() {
     }
     auto doc = GetJSON(path);
     auto root = doc->GetRoot();
-    root.GetMember("items").IterateArray([&](JSONValue item) {
-      CodaTableInfo table;
-      table.id = item.GetMember("id").GetString();
-      table.name = item.GetMember("name").GetString();
-      auto table_type = item.GetMember("tableType");
-      table.table_type =
-          table_type.IsString() ? table_type.GetString() : "table";
-      table.is_view = table.table_type != "table";
-      table.columns = ListColumns(table.id);
-      result.push_back(std::move(table));
-    });
+    RequireArrayMember(root, "items", "tables")
+        .IterateArray([&](JSONValue item) {
+          CodaTableInfo table;
+          table.id = RequireStringMember(item, "id", "table");
+          table.name = RequireStringMember(item, "name", "table");
+          auto table_type = item.GetMember("tableType");
+          table.table_type =
+              table_type.IsString() ? table_type.GetString() : "table";
+          table.is_view = table.table_type != "table";
+          table.columns = ListColumns(table.id);
+          result.push_back(std::move(table));
+        });
     auto next = root.GetMember("nextPageToken");
     page_token = next.IsString() ? next.GetString() : string();
   } while (!page_token.empty());
@@ -149,28 +176,27 @@ vector<CodaColumnInfo> CodaClient::ListColumns(const string &table_id) {
     }
     auto doc = GetJSON(path);
     auto root = doc->GetRoot();
-    root.GetMember("items").IterateArray([&](JSONValue item) {
-      CodaColumnInfo column;
-      column.id = item.GetMember("id").GetString();
-      column.name = item.GetMember("name").GetString();
-      auto calculated = item.GetMember("calculated");
-      column.calculated = calculated.IsValid() &&
-                          calculated.GetType() == JSONValueType::BOOLEAN &&
-                          calculated.GetBoolean();
-      auto format = item.GetMember("format");
-      if (format.IsObject()) {
-        auto type = format.GetMember("type");
-        column.format_type = type.IsString() ? type.GetString() : "text";
-        auto array = format.GetMember("isArray");
-        column.is_array = array.IsValid() &&
-                          array.GetType() == JSONValueType::BOOLEAN &&
-                          array.GetBoolean();
-      } else {
-        column.format_type = "text";
-      }
-      column.duckdb_type = CodaLogicalType(column.format_type, column.is_array);
-      result.push_back(std::move(column));
-    });
+    RequireArrayMember(root, "items", "columns")
+        .IterateArray([&](JSONValue item) {
+          CodaColumnInfo column;
+          column.id = RequireStringMember(item, "id", "column");
+          column.name = RequireStringMember(item, "name", "column");
+          column.calculated = OptionalBooleanMember(item, "calculated");
+          auto format = item.GetMember("format");
+          if (format.IsObject()) {
+            auto type = format.GetMember("type");
+            column.format_type = type.IsString() ? type.GetString() : "text";
+            auto array = format.GetMember("isArray");
+            column.is_array = array.IsValid() &&
+                              array.GetType() == JSONValueType::BOOLEAN &&
+                              array.GetBoolean();
+          } else {
+            column.format_type = "text";
+          }
+          column.duckdb_type =
+              CodaLogicalType(column.format_type, column.is_array);
+          result.push_back(std::move(column));
+        });
     auto next = root.GetMember("nextPageToken");
     page_token = next.IsString() ? next.GetString() : string();
   } while (!page_token.empty());
@@ -192,9 +218,9 @@ vector<CodaRow> CodaClient::ListRows(const string &table_id,
   auto doc = GetJSON(path);
   auto root = doc->GetRoot();
   vector<CodaRow> rows;
-  root.GetMember("items").IterateArray([&](JSONValue item) {
+  RequireArrayMember(root, "items", "rows").IterateArray([&](JSONValue item) {
     CodaRow row;
-    row.id = item.GetMember("id").GetString();
+    row.id = RequireStringMember(item, "id", "row");
     auto values = item.GetMember("values");
     if (values.IsObject()) {
       values.IterateObject([&](const string &key, JSONValue value) {

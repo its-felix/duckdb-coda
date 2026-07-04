@@ -30,6 +30,16 @@ ATTACH 'doc-id' AS coda_doc (TYPE coda, TOKEN 'coda-api-token');
 The initial version intentionally exposes only Coda tables. DDL is not supported: the extension does not create, drop,
 or alter Coda tables.
 
+## Testing
+
+```sh
+make test_debug T=test/sql/coda_offline.test
+make test_coda_http_mock
+```
+
+The HTTP mock test starts a local Coda-like server and verifies request paths, query parameters, auth headers, read
+responses, DML request bodies, and non-crashing error handling for bad HTTP/JSON responses.
+
 ## Notes
 
 - Coda row IDs are surfaced internally as DuckDB's virtual `rowid` and are used for updates and deletes.

@@ -5,22 +5,30 @@
 
 namespace duckdb {
 
+class TableCatalogEntry;
+
 struct CodaScanBindData : FunctionData {
-  CodaScanBindData(string doc_id_p, string token_p, CodaTableInfo table_p)
-      : doc_id(std::move(doc_id_p)), token(std::move(token_p)),
+  CodaScanBindData(TableCatalogEntry &table_entry_p, string doc_id_p,
+                   string token_p, string api_base_p, CodaTableInfo table_p)
+      : table_entry(table_entry_p), doc_id(std::move(doc_id_p)),
+        token(std::move(token_p)), api_base(std::move(api_base_p)),
         table(std::move(table_p)) {}
 
   unique_ptr<FunctionData> Copy() const override {
-    return make_uniq<CodaScanBindData>(doc_id, token, table);
+    return make_uniq<CodaScanBindData>(table_entry, doc_id, token, api_base,
+                                       table);
   }
 
   bool Equals(const FunctionData &other_p) const override {
     auto &other = other_p.Cast<CodaScanBindData>();
-    return doc_id == other.doc_id && table.id == other.table.id;
+    return &table_entry == &other.table_entry && doc_id == other.doc_id &&
+           api_base == other.api_base && table.id == other.table.id;
   }
 
+  TableCatalogEntry &table_entry;
   string doc_id;
   string token;
+  string api_base;
   CodaTableInfo table;
 };
 
