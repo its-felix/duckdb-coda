@@ -6,6 +6,7 @@ set(EXTENSION_NAME ${TARGET_NAME}_extension)
 project(${TARGET_NAME})
 
 include_directories(src/include)
+find_package(CURL REQUIRED)
 
 set(EXTENSION_SOURCES
     src/coda_client.cpp
@@ -20,6 +21,9 @@ set(EXTENSION_SOURCES
 
 add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} "-warnings" ${EXTENSION_SOURCES})
+
+target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
+target_link_libraries(${TARGET_NAME}_loadable_extension CURL::libcurl)
 
 install(
   TARGETS ${EXTENSION_NAME}

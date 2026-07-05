@@ -174,8 +174,8 @@ class MockCodaHandler(BaseHTTPRequestHandler):
             self._send_json({"requestId": "update-request"}, 202)
             return
 
-        if self.command == "DELETE" and parsed.path == f"/docs/{DOC_ID}/tables/grid-1/rows/row-2":
-            self._send_json({"requestId": "delete-request"}, 202)
+        if self.command == "DELETE" and parsed.path == f"/docs/{DOC_ID}/tables/grid-1/rows":
+            self._send_json({"requestId": "delete-request", "rowIds": ["row-2"]}, 202)
             return
 
         self._send_json({"message": f"unexpected {self.command} {parsed.path}"}, 404)
@@ -296,9 +296,10 @@ DELETE FROM coda_doc.main.Tasks WHERE Name = 'Beta';
     update_body = json.loads(update["body"])
     assert_json_cells(update_body["row"]["cells"], {"c-done": False, "c-amount": 4.5})
 
-    delete = require_request(requests, "DELETE", f"/docs/{DOC_ID}/tables/grid-1/rows/row-2")
-    if delete["body"]:
-        raise AssertionError(f"DELETE should not send a request body, got {delete['body']}")
+    delete = require_request(requests, "DELETE", f"/docs/{DOC_ID}/tables/grid-1/rows")
+    delete_body = json.loads(delete["body"])
+    if delete_body != {"rowIds": ["row-2"]}:
+        raise AssertionError(f"expected bulk DELETE rowIds body, got {delete_body}")
 
 
 def run_failure_case(duckdb, extension, api_base, prefix, expected_error):

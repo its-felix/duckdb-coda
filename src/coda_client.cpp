@@ -4,6 +4,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
+#include <curl/curl.h>
+
 namespace duckdb {
 
 static LogicalType CodaLogicalType(const string &format_type, bool is_array) {
@@ -45,6 +47,29 @@ static bool OptionalBooleanMember(JSONValue value, const string &key) {
   auto member = value.GetMember(key);
   return member.IsValid() && member.GetType() == JSONValueType::BOOLEAN &&
          member.GetBoolean();
+}
+
+static size_t CurlWriteCallback(char *data, size_t size, size_t nmemb,
+                                void *userdata) {
+  auto byte_count = size * nmemb;
+  auto &body = *reinterpret_cast<string *>(userdata);
+  body.append(data, byte_count);
+  return byte_count;
+}
+
+static unique_ptr<curl_slist, void (*)(curl_slist *)>
+CurlHeaders(const HTTPHeaders &headers) {
+  curl_slist *list = nullptr;
+  for (auto &entry : headers) {
+    auto header = entry.first + ": " + entry.second;
+    list = curl_slist_append(list, header.c_str());
+  }
+  return unique_ptr<curl_slist, void (*)(curl_slist *)>(
+      list, [](curl_slist *headers) {
+        if (headers) {
+          curl_slist_free_all(headers);
+        }
+      });
 }
 
 CodaClient::CodaClient(ClientContext &context_p, string doc_id_p,
@@ -125,14 +150,71 @@ unique_ptr<JSONDocument> CodaClient::PutJSON(const string &path_and_query,
 
 unique_ptr<JSONDocument> CodaClient::DeleteJSON(const string &path_and_query,
                                                 const string &body) {
-  if (!body.empty()) {
-    throw InternalException(
-        "DELETE bodies are not supported by DuckDB HTTPUtil in this extension");
-  }
   auto url = BuildURL(path_and_query);
   auto params = BuildParams(url);
-  DeleteRequestInfo request(url, BuildHeaders(), *params);
-  auto response = HTTPUtil::Get(*context.db).Request(request);
+
+  auto curl = unique_ptr<CURL, void (*)(CURL *)>(curl_easy_init(),
+                                                curl_easy_cleanup);
+  if (!curl) {
+    throw IOException("Failed to initialize curl for Coda DELETE request");
+  }
+
+  auto headers = BuildHeaders();
+  for (auto &entry : params->extra_headers) {
+    headers.Insert(entry.first, entry.second);
+  }
+  auto curl_headers = CurlHeaders(headers);
+
+  string response_body;
+  char error_buffer[CURL_ERROR_SIZE] = {0};
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_CUSTOMREQUEST, "DELETE");
+  curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, curl_headers.get());
+  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE, body.size());
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, CurlWriteCallback);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response_body);
+  curl_easy_setopt(curl.get(), CURLOPT_ERRORBUFFER, error_buffer);
+  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION,
+                   params->follow_location ? 1L : 0L);
+  curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, params->timeout);
+  curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, params->timeout);
+  if (!params->http_proxy.empty()) {
+    auto proxy = params->http_proxy;
+    if (params->http_proxy_port != 0) {
+      proxy += ":" + to_string(params->http_proxy_port);
+    }
+    curl_easy_setopt(curl.get(), CURLOPT_PROXY, proxy.c_str());
+    if (!params->http_proxy_username.empty()) {
+      curl_easy_setopt(curl.get(), CURLOPT_PROXYUSERNAME,
+                       params->http_proxy_username.c_str());
+      curl_easy_setopt(curl.get(), CURLOPT_PROXYPASSWORD,
+                       params->http_proxy_password.c_str());
+    }
+  }
+  if (params->override_verify_ssl && !params->verify_ssl) {
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
+  }
+
+  auto curl_result = curl_easy_perform(curl.get());
+  long response_code = 0;
+  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response_code);
+
+  auto response = make_uniq<HTTPResponse>(
+      HTTPUtil::ToStatusCode(static_cast<int32_t>(response_code)));
+  response->url = url;
+  response->body = std::move(response_body);
+  response->success = response_code >= 200 && response_code < 300;
+  if (curl_result != CURLE_OK) {
+    response->success = false;
+    response->request_error =
+        error_buffer[0] ? string(error_buffer) : curl_easy_strerror(curl_result);
+  } else if (!response->success) {
+    response->reason = response->body.empty()
+                           ? HTTPUtil::GetStatusMessage(response->status)
+                           : response->body;
+  }
   return ParseResponse("DELETE", url, std::move(response));
 }
 
@@ -359,16 +441,20 @@ idx_t CodaClient::UpdateRows(
 
 idx_t CodaClient::DeleteRows(const CodaTableInfo &table, DataChunk &chunk,
                              idx_t row_id_index) {
-  idx_t deleted = 0;
+  JSONWriter writer;
+  auto root = writer.CreateObject();
+  auto row_ids = writer.CreateArray();
   for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
     auto row_id = chunk.GetValue(row_id_index, row_idx).ToString();
-    auto path = "/docs/" + StringUtil::URLEncode(doc_id) + "/tables/" +
-                StringUtil::URLEncode(table.id) + "/rows/" +
-                StringUtil::URLEncode(row_id);
-    DeleteJSON(path, string());
-    deleted++;
+    row_ids.Append(writer.CreateString(row_id));
   }
-  return deleted;
+  root.Add("rowIds", std::move(row_ids));
+  writer.SetRoot(std::move(root));
+
+  auto path = "/docs/" + StringUtil::URLEncode(doc_id) + "/tables/" +
+              StringUtil::URLEncode(table.id) + "/rows";
+  DeleteJSON(path, writer.ToString());
+  return chunk.size();
 }
 
 } // namespace duckdb
