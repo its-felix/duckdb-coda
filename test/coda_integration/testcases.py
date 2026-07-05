@@ -35,6 +35,7 @@ SELECT
     updatedAt IS NOT NULL
 FROM {table}
 WHERE {sql_ident('Name')} = 'Alpha';
+SELECT createdAt FROM {table} ORDER BY createdAt LIMIT 1;
 """
     result = run_duckdb(duckdb, extension, sql)
     expected_lines = [

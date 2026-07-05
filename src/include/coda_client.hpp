@@ -36,7 +36,22 @@ struct CodaRow {
   string id;
   string created_at;
   string updated_at;
+  bool deleted = false;
   case_insensitive_map_t<CodaCellValue> values;
+};
+
+struct CodaListRowsRequest {
+  string page_token;
+  string query;
+  string sort_by;
+  string sync_token;
+  idx_t limit = 500;
+};
+
+struct CodaListRowsResponse {
+  vector<CodaRow> rows;
+  string next_page_token;
+  string next_sync_token;
 };
 
 class CodaClient {
@@ -46,8 +61,8 @@ public:
 
   vector<CodaTableInfo> ListTables();
   vector<CodaColumnInfo> ListColumns(const string &table_id);
-  vector<CodaRow> ListRows(const string &table_id, const string &page_token,
-                           string &next_page_token, idx_t limit = 500);
+  CodaListRowsResponse ListRows(const string &table_id,
+                                const CodaListRowsRequest &request);
 
   idx_t InsertRows(const CodaTableInfo &table, DataChunk &chunk);
   idx_t UpdateRows(const CodaTableInfo &table, DataChunk &chunk,

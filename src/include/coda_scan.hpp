@@ -15,8 +15,13 @@ struct CodaScanBindData : FunctionData {
         table(std::move(table_p)) {}
 
   unique_ptr<FunctionData> Copy() const override {
-    return make_uniq<CodaScanBindData>(table_entry, doc_id, token, api_base,
-                                       table);
+    auto copy = make_uniq<CodaScanBindData>(table_entry, doc_id, token,
+                                            api_base, table);
+    copy->pushed_query = pushed_query;
+    copy->pushed_query_description = pushed_query_description;
+    copy->pushed_sort_by = pushed_sort_by;
+    copy->pushed_limit = pushed_limit;
+    return std::move(copy);
   }
 
   bool Equals(const FunctionData &other_p) const override {
@@ -30,6 +35,10 @@ struct CodaScanBindData : FunctionData {
   string token;
   string api_base;
   CodaTableInfo table;
+  string pushed_query;
+  string pushed_query_description;
+  string pushed_sort_by;
+  idx_t pushed_limit = 0;
 };
 
 class CodaScanFunction {

@@ -285,24 +285,40 @@ vector<CodaColumnInfo> CodaClient::ListColumns(const string &table_id) {
   return result;
 }
 
-vector<CodaRow> CodaClient::ListRows(const string &table_id,
-                                     const string &page_token,
-                                     string &next_page_token, idx_t limit) {
+static void AppendQueryParam(string &path, const string &name,
+                             const string &value) {
+  path += "&" + name + "=" + StringUtil::URLEncode(value);
+}
+
+CodaListRowsResponse
+CodaClient::ListRows(const string &table_id,
+                     const CodaListRowsRequest &request) {
   auto path = "/docs/" + StringUtil::URLEncode(doc_id) + "/tables/" +
               StringUtil::URLEncode(table_id) +
               "/rows?valueFormat=simpleWithArrays&useColumnNames=false&"
               "visibleOnly=false&limit=" +
-              to_string(limit);
-  if (!page_token.empty()) {
-    path += "&pageToken=" + StringUtil::URLEncode(page_token);
+              to_string(request.limit);
+  if (!request.page_token.empty()) {
+    AppendQueryParam(path, "pageToken", request.page_token);
+  }
+  if (!request.sync_token.empty()) {
+    AppendQueryParam(path, "syncToken", request.sync_token);
+  }
+  if (!request.query.empty()) {
+    AppendQueryParam(path, "query", request.query);
+  }
+  if (!request.sort_by.empty()) {
+    AppendQueryParam(path, "sortBy", request.sort_by);
   }
 
   auto doc = GetJSON(path);
   auto root = doc->GetRoot();
-  vector<CodaRow> rows;
+  CodaListRowsResponse response;
   RequireArrayMember(root, "items", "rows").IterateArray([&](JSONValue item) {
     CodaRow row;
     row.id = RequireStringMember(item, "id", "row");
+    row.deleted = OptionalBooleanMember(item, "deleted") ||
+                  OptionalBooleanMember(item, "isDeleted");
     auto created_at = item.GetMember("createdAt");
     if (created_at.IsString()) {
       row.created_at = created_at.GetString();
@@ -324,11 +340,14 @@ vector<CodaRow> CodaClient::ListRows(const string &table_id,
         row.values[key] = std::move(cell);
       });
     }
-    rows.push_back(std::move(row));
+    response.rows.push_back(std::move(row));
   });
   auto next = root.GetMember("nextPageToken");
-  next_page_token = next.IsString() ? next.GetString() : string();
-  return rows;
+  response.next_page_token = next.IsString() ? next.GetString() : string();
+  auto next_sync = root.GetMember("nextSyncToken");
+  response.next_sync_token =
+      next_sync.IsString() ? next_sync.GetString() : string();
+  return response;
 }
 
 JSONMutableValue CodaClient::ValueToJSON(JSONWriter &writer,

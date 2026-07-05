@@ -132,32 +132,47 @@ class MockCodaHandler(BaseHTTPRequestHandler):
             return
 
         if self.command == "GET" and parsed.path == f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows":
+            items = [
+                {
+                    "id": "row-1",
+                    "createdAt": "2018-04-11T00:18:57.946Z",
+                    "updatedAt": "2018-04-12T00:18:57.946Z",
+                    "values": {
+                        "c-name": "Alpha",
+                        "c-done": True,
+                        "c-amount": 1.25,
+                        "c-formula": "computed",
+                    },
+                },
+                {
+                    "id": "row-2",
+                    "createdAt": "2018-04-13T00:18:57.946Z",
+                    "updatedAt": "2018-04-14T00:18:57.946Z",
+                    "values": {
+                        "c-name": "Beta",
+                        "c-done": False,
+                        "c-amount": 2.5,
+                        "c-formula": "computed",
+                    },
+                },
+            ]
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            if "syncToken" in query:
+                self._send_json({"items": [], "nextSyncToken": "sync-token-2"})
+                return
+            coda_query = query.get("query", [])
+            if coda_query:
+                column, _, raw_value = coda_query[-1].partition(":")
+                value = json.loads(raw_value)
+                items = [item for item in items if item["values"].get(column) == value]
+            sort_by = query.get("sortBy", [])
+            if sort_by and sort_by[-1] in ("createdAt", "updatedAt"):
+                items = sorted(items, key=lambda item: item[sort_by[-1]])
+            limit = int(query.get("limit", ["500"])[-1])
             self._send_json(
                 {
-                    "items": [
-                        {
-                            "id": "row-1",
-                            "createdAt": "2018-04-11T00:18:57.946Z",
-                            "updatedAt": "2018-04-12T00:18:57.946Z",
-                            "values": {
-                                "c-name": "Alpha",
-                                "c-done": True,
-                                "c-amount": 1.25,
-                                "c-formula": "computed",
-                            },
-                        },
-                        {
-                            "id": "row-2",
-                            "createdAt": "2018-04-13T00:18:57.946Z",
-                            "updatedAt": "2018-04-14T00:18:57.946Z",
-                            "values": {
-                                "c-name": "Beta",
-                                "c-done": False,
-                                "c-amount": 2.5,
-                                "c-formula": "computed",
-                            },
-                        },
-                    ]
+                    "items": items[:limit],
+                    "nextSyncToken": "sync-token-1",
                 }
             )
             return
@@ -222,11 +237,18 @@ class MockBackend:
         assert_query(columns["query"], "limit", ["100"])
         assert_query(columns["query"], "visibleOnly", ["false"])
 
-        rows = require_request(requests, "GET", f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows")
+        row_requests = request_matching(requests, "GET", f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows")
+        rows = next(row for row in row_requests if "query" not in row["query"])
         assert_query(rows["query"], "valueFormat", ["simpleWithArrays"])
         assert_query(rows["query"], "useColumnNames", ["false"])
         assert_query(rows["query"], "visibleOnly", ["false"])
         assert_query(rows["query"], "limit", ["500"])
+        alpha_rows = next(row for row in row_requests if row["query"].get("query") == ['c-name:"Alpha"'])
+        assert_query(alpha_rows["query"], "limit", ["500"])
+        beta_rows = next(row for row in row_requests if row["query"].get("query") == ['c-name:"Beta"'])
+        assert_query(beta_rows["query"], "limit", ["500"])
+        if not any(row["query"].get("syncToken") == ["sync-token-1"] for row in row_requests):
+            raise AssertionError(f"missing syncToken rows request; saw {row_requests}")
 
         insert = require_request(requests, "POST", f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows")
         assert_query(insert["query"], "disableParsing", ["false"])
@@ -249,7 +271,13 @@ class MockBackend:
     def assert_metadata_case(self):
         requests = MockCodaHandler.state.snapshot()
         assert_mock_authenticated(requests)
-        require_request(requests, "GET", f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows")
+        rows = request_matching(requests, "GET", f"/docs/{MOCK_DOC_ID}/tables/grid-1/rows")
+        if not any(row["query"].get("query") == ['c-name:"Alpha"'] for row in rows):
+            raise AssertionError(f"missing pushed metadata filter request; saw {rows}")
+        sorted_rows = [row for row in rows if row["query"].get("sortBy") == ["createdAt"]]
+        if not sorted_rows:
+            raise AssertionError(f"missing pushed metadata sort request; saw {rows}")
+        assert_query(sorted_rows[-1]["query"], "limit", ["1"])
 
     def run_failure_case(self, duckdb, extension, prefix, expected_error):
         result = run_duckdb(
