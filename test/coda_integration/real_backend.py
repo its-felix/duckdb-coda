@@ -173,8 +173,7 @@ class RealBackend:
             page_tables = [
                 table
                 for table in last_tables
-                if table.get("tableType", "table") == "table"
-                and table.get("parent", {}).get("id") == page_id
+                if table.get("tableType", "table") == "table" and table.get("parent", {}).get("id") == page_id
             ]
             if page_tables:
                 table = page_tables[0]

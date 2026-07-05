@@ -16,6 +16,9 @@ jobs:
     env:
       CODA_TEST_API_TOKEN: ${{ secrets.CODA_TEST_API_TOKEN }}
       CODA_TEST_DOC_ID: ${{ secrets.CODA_TEST_DOC_ID }}
+      USE_MERGED_VCPKG_MANIFEST: "1"
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      GEN: ninja
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,6 +26,13 @@ jobs:
 
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Set up VCPKG
+        run: |
+          make setup-vcpkg
+          if [ "$(git -C vcpkg rev-parse --is-shallow-repository)" = "true" ]; then
+            git -C vcpkg fetch --unshallow --tags
+          fi
 
       - name: Check Coda test secrets
         run: |

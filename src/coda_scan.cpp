@@ -87,8 +87,7 @@ static string CodaQueryLiteral(const Value &value) {
 
 static bool TryExtractCodaEqualityFilter(const LogicalGet &get,
                                          const CodaTableInfo &table,
-                                         const Expression &expr,
-                                         string &query,
+                                         const Expression &expr, string &query,
                                          string &description) {
   if (expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL ||
       expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
@@ -134,10 +133,10 @@ static bool TryExtractCodaEqualityFilter(const LogicalGet &get,
   return true;
 }
 
-static void CodaScanPushdownComplexFilter(ClientContext &, LogicalGet &get,
-                                          FunctionData *bind_data_p,
-                                          vector<unique_ptr<Expression>>
-                                              &filters) {
+static void
+CodaScanPushdownComplexFilter(ClientContext &, LogicalGet &get,
+                              FunctionData *bind_data_p,
+                              vector<unique_ptr<Expression>> &filters) {
   auto &bind_data = bind_data_p->Cast<CodaScanBindData>();
   if (!bind_data.pushed_query.empty()) {
     return;
@@ -146,8 +145,8 @@ static void CodaScanPushdownComplexFilter(ClientContext &, LogicalGet &get,
   for (idx_t filter_idx = 0; filter_idx < filters.size(); filter_idx++) {
     string query;
     string description;
-    if (!TryExtractCodaEqualityFilter(get, bind_data.table, *filters[filter_idx],
-                                      query, description)) {
+    if (!TryExtractCodaEqualityFilter(
+            get, bind_data.table, *filters[filter_idx], query, description)) {
       continue;
     }
     bind_data.pushed_query = std::move(query);

@@ -153,8 +153,8 @@ unique_ptr<JSONDocument> CodaClient::DeleteJSON(const string &path_and_query,
   auto url = BuildURL(path_and_query);
   auto params = BuildParams(url);
 
-  auto curl = unique_ptr<CURL, void (*)(CURL *)>(curl_easy_init(),
-                                                curl_easy_cleanup);
+  auto curl =
+      unique_ptr<CURL, void (*)(CURL *)>(curl_easy_init(), curl_easy_cleanup);
   if (!curl) {
     throw IOException("Failed to initialize curl for Coda DELETE request");
   }
@@ -208,8 +208,8 @@ unique_ptr<JSONDocument> CodaClient::DeleteJSON(const string &path_and_query,
   response->success = response_code >= 200 && response_code < 300;
   if (curl_result != CURLE_OK) {
     response->success = false;
-    response->request_error =
-        error_buffer[0] ? string(error_buffer) : curl_easy_strerror(curl_result);
+    response->request_error = error_buffer[0] ? string(error_buffer)
+                                              : curl_easy_strerror(curl_result);
   } else if (!response->success) {
     response->reason = response->body.empty()
                            ? HTTPUtil::GetStatusMessage(response->status)
@@ -290,9 +290,8 @@ static void AppendQueryParam(string &path, const string &name,
   path += "&" + name + "=" + StringUtil::URLEncode(value);
 }
 
-CodaListRowsResponse
-CodaClient::ListRows(const string &table_id,
-                     const CodaListRowsRequest &request) {
+CodaListRowsResponse CodaClient::ListRows(const string &table_id,
+                                          const CodaListRowsRequest &request) {
   auto path = "/docs/" + StringUtil::URLEncode(doc_id) + "/tables/" +
               StringUtil::URLEncode(table_id) +
               "/rows?valueFormat=simpleWithArrays&useColumnNames=false&"
