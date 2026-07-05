@@ -50,10 +50,15 @@ or alter Coda tables.
 ```sh
 make test_debug T=test/sql/coda_offline.test
 make test_coda_http_mock
+make test_coda_http_real
 ```
 
 The HTTP mock test starts a local Coda-like server and verifies request paths, query parameters, auth headers, read
 responses, DML request bodies, and non-crashing error handling for bad HTTP/JSON responses.
+
+The real Coda integration test reads `CODA_TEST_API_TOKEN` from the environment or local `.env`. Set
+`CODA_TEST_DOC_ID` when the token is restricted to a specific doc; the harness creates a temporary per-run page in that
+doc, creates test table content on the page, and deletes the page afterwards.
 
 ## Notes
 

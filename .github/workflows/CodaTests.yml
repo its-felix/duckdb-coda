@@ -1,0 +1,36 @@
+name: Coda Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: true
+
+jobs:
+  coda-tests:
+    name: Mock and real Coda API tests
+    runs-on: ubuntu-latest
+    env:
+      CODA_TEST_API_TOKEN: ${{ secrets.CODA_TEST_API_TOKEN }}
+      CODA_TEST_DOC_ID: ${{ secrets.CODA_TEST_DOC_ID || 'FdaxGtdczC' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Run mocked Coda API tests
+        run: make test_coda_http_mock
+
+      - name: Run real Coda API tests
+        if: env.CODA_TEST_API_TOKEN != ''
+        run: make test_coda_http_real
+
+      - name: Skip real Coda API tests
+        if: env.CODA_TEST_API_TOKEN == ''
+        run: echo "CODA_TEST_API_TOKEN is unavailable; skipping real Coda API tests."

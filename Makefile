@@ -11,4 +11,8 @@ include extension-ci-tools/makefiles/vcpkg.Makefile
 
 .PHONY: test_coda_http_mock
 test_coda_http_mock: debug
-	python3 test/coda_http_mock.py
+	python3 test/coda_http_mock.py --backend mock
+
+.PHONY: test_coda_http_real
+test_coda_http_real: debug
+	python3 test/coda_http_mock.py --backend real --require-real
