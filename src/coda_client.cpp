@@ -303,6 +303,14 @@ vector<CodaRow> CodaClient::ListRows(const string &table_id,
   RequireArrayMember(root, "items", "rows").IterateArray([&](JSONValue item) {
     CodaRow row;
     row.id = RequireStringMember(item, "id", "row");
+    auto created_at = item.GetMember("createdAt");
+    if (created_at.IsString()) {
+      row.created_at = created_at.GetString();
+    }
+    auto updated_at = item.GetMember("updatedAt");
+    if (updated_at.IsString()) {
+      row.updated_at = updated_at.GetString();
+    }
     auto values = item.GetMember("values");
     if (values.IsObject()) {
       values.IterateObject([&](const string &key, JSONValue value) {
@@ -355,7 +363,8 @@ string CodaClient::RowEditJSON(const CodaTableInfo &table, DataChunk &chunk,
   auto root = writer.CreateObject();
   auto cells = writer.CreateArray();
   for (idx_t col_idx = 0; col_idx < table.columns.size(); col_idx++) {
-    if (table.columns[col_idx].calculated) {
+    if (table.columns[col_idx].calculated ||
+        table.columns[col_idx].row_metadata) {
       continue;
     }
     auto cell = writer.CreateObject();
@@ -407,7 +416,8 @@ idx_t CodaClient::UpdateRows(
     for (idx_t expr_idx = 0; expr_idx < expressions.size(); expr_idx++) {
       auto col_idx = columns[expr_idx].index;
       if (col_idx >= table.columns.size() ||
-          table.columns[col_idx].calculated) {
+          table.columns[col_idx].calculated ||
+          table.columns[col_idx].row_metadata) {
         continue;
       }
       Value value;

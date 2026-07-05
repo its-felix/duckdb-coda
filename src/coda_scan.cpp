@@ -61,6 +61,18 @@ static Value CellToValue(const CodaCellValue &cell,
   }
 }
 
+static Value MetadataToValue(const string &value,
+                             const LogicalType &target_type) {
+  if (value.empty()) {
+    return Value(target_type);
+  }
+  try {
+    return Value(value).DefaultCastAs(target_type);
+  } catch (...) {
+    return Value(target_type);
+  }
+}
+
 static void CodaScan(ClientContext &, TableFunctionInput &input,
                      DataChunk &output) {
   auto &state = input.global_state->Cast<CodaScanGlobalState>();
@@ -103,6 +115,18 @@ static void CodaScan(ClientContext &, TableFunctionInput &input,
         throw InternalException("Coda scan column index out of range");
       }
       auto &column = state.table.columns[col_idx];
+      if (column.row_metadata) {
+        if (StringUtil::CIEquals(column.id, "createdAt")) {
+          output.data[out_col].SetValue(
+              out_row, MetadataToValue(row.created_at, column.duckdb_type));
+        } else if (StringUtil::CIEquals(column.id, "updatedAt")) {
+          output.data[out_col].SetValue(
+              out_row, MetadataToValue(row.updated_at, column.duckdb_type));
+        } else {
+          output.data[out_col].SetValue(out_row, Value(column.duckdb_type));
+        }
+        continue;
+      }
       auto entry = row.values.find(column.id);
       if (entry == row.values.end()) {
         output.data[out_col].SetValue(out_row, Value(column.duckdb_type));

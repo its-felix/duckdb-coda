@@ -145,6 +145,8 @@ class MockCodaHandler(BaseHTTPRequestHandler):
                     "items": [
                         {
                             "id": "row-1",
+                            "createdAt": "2018-04-11T00:18:57.946Z",
+                            "updatedAt": "2018-04-12T00:18:57.946Z",
                             "values": {
                                 "c-name": "Alpha",
                                 "c-done": True,
@@ -154,6 +156,8 @@ class MockCodaHandler(BaseHTTPRequestHandler):
                         },
                         {
                             "id": "row-2",
+                            "createdAt": "2018-04-13T00:18:57.946Z",
+                            "updatedAt": "2018-04-14T00:18:57.946Z",
                             "values": {
                                 "c-name": "Beta",
                                 "c-done": False,
@@ -216,8 +220,11 @@ def run_duckdb(duckdb, extension, sql, expect_success=True):
     return result
 
 
-def attach_sql(api_base):
-    return f"ATTACH '{DOC_ID}' AS coda_doc " f"(TYPE coda, TOKEN '{TOKEN}', API_BASE '{sql_quote(api_base)}');"
+def attach_sql(api_base, include_row_metadata=False):
+    options = ["TYPE coda", f"TOKEN '{TOKEN}'", f"API_BASE '{sql_quote(api_base)}'"]
+    if include_row_metadata:
+        options.append("INCLUDE_ROW_METADATA true")
+    return f"ATTACH '{DOC_ID}' AS coda_doc ({', '.join(options)});"
 
 
 def request_matching(requests, method, path):
@@ -302,6 +309,41 @@ DELETE FROM coda_doc.main.Tasks WHERE Name = 'Beta';
         raise AssertionError(f"expected bulk DELETE rowIds body, got {delete_body}")
 
 
+def run_metadata_case(duckdb, extension, api_base, state):
+    state.clear()
+    sql = f"""
+{attach_sql(api_base, include_row_metadata=True)}
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog = 'coda_doc'
+  AND table_schema = 'main'
+  AND table_name = 'Tasks'
+  AND column_name IN ('createdAt', 'updatedAt')
+ORDER BY column_name;
+SELECT
+    Name,
+    typeof(createdAt),
+    typeof(updatedAt),
+    createdAt = TIMESTAMPTZ '2018-04-11T00:18:57.946Z',
+    updatedAt = TIMESTAMPTZ '2018-04-12T00:18:57.946Z'
+FROM coda_doc.main.Tasks
+WHERE Name = 'Alpha';
+"""
+    result = run_duckdb(duckdb, extension, sql)
+    expected_lines = [
+        "createdAt,TIMESTAMP WITH TIME ZONE",
+        "updatedAt,TIMESTAMP WITH TIME ZONE",
+        "Alpha,TIMESTAMP WITH TIME ZONE,TIMESTAMP WITH TIME ZONE,true,true",
+    ]
+    for line in expected_lines:
+        if line not in result.stdout:
+            raise AssertionError(f"expected metadata output line {line!r}, got:\n{result.stdout}")
+
+    requests = state.snapshot()
+    assert_authenticated(requests)
+    require_request(requests, "GET", f"/docs/{DOC_ID}/tables/grid-1/rows")
+
+
 def run_failure_case(duckdb, extension, api_base, prefix, expected_error):
     result = run_duckdb(
         duckdb,
@@ -337,6 +379,7 @@ def main():
 
     try:
         run_success_case(duckdb, extension, api_base, MockCodaHandler.state)
+        run_metadata_case(duckdb, extension, api_base, MockCodaHandler.state)
         run_failure_case(duckdb, extension, api_base, "/status500", "HTTP 500")
         run_failure_case(duckdb, extension, api_base, "/invalid-json", "Failed to parse JSON")
         run_failure_case(duckdb, extension, api_base, "/empty-body", "Failed to parse JSON")

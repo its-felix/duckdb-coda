@@ -9,7 +9,7 @@ namespace duckdb {
 class CodaCatalog : public Catalog {
 public:
   CodaCatalog(AttachedDatabase &db, ClientContext &context, string doc_id,
-              string token, string api_base);
+              string token, string api_base, bool include_row_metadata);
   ~CodaCatalog() override;
 
   string GetCatalogType() override { return "coda"; }
@@ -55,6 +55,7 @@ public:
   const string &DocId() const { return doc_id; }
   const string &Token() const { return token; }
   const string &APIBase() const { return api_base; }
+  bool IncludeRowMetadata() const { return include_row_metadata; }
 
 private:
   void LoadCatalog(ClientContext &context);
@@ -63,6 +64,7 @@ private:
   string doc_id;
   string token;
   string api_base;
+  bool include_row_metadata;
   vector<CodaTableInfo> tables;
   unique_ptr<CodaSchemaCatalogEntry> main_schema;
 };

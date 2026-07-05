@@ -15,6 +15,7 @@ struct CodaColumnInfo {
   string format_type;
   bool is_array = false;
   bool calculated = false;
+  bool row_metadata = false;
   LogicalType duckdb_type = LogicalType::VARCHAR;
 };
 
@@ -33,6 +34,8 @@ struct CodaCellValue {
 
 struct CodaRow {
   string id;
+  string created_at;
+  string updated_at;
   case_insensitive_map_t<CodaCellValue> values;
 };
 

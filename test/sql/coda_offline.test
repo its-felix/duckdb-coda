@@ -14,3 +14,8 @@ Coda token not provided
 
 statement ok
 CREATE SECRET coda_offline (TYPE coda, TOKEN 'dummy-token');
+
+statement error
+ATTACH 'dummy-doc' AS coda_bad_metadata_option (TYPE coda, TOKEN 'dummy-token', INCLUDE_ROW_METADATA 'maybe');
+----
+Coda attach option include_row_metadata must be a boolean

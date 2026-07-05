@@ -14,9 +14,11 @@
 namespace duckdb {
 
 CodaCatalog::CodaCatalog(AttachedDatabase &db, ClientContext &context,
-                         string doc_id_p, string token_p, string api_base_p)
+                         string doc_id_p, string token_p, string api_base_p,
+                         bool include_row_metadata_p)
     : Catalog(db), doc_id(std::move(doc_id_p)), token(std::move(token_p)),
-      api_base(std::move(api_base_p)) {
+      api_base(std::move(api_base_p)),
+      include_row_metadata(include_row_metadata_p) {
   LoadCatalog(context);
 }
 
@@ -25,6 +27,25 @@ CodaCatalog::~CodaCatalog() {}
 void CodaCatalog::LoadCatalog(ClientContext &context) {
   auto client = Client(context);
   tables = client.ListTables();
+  if (include_row_metadata) {
+    for (auto &table : tables) {
+      CodaColumnInfo created_at;
+      created_at.id = "createdAt";
+      created_at.name = "createdAt";
+      created_at.row_metadata = true;
+      created_at.calculated = true;
+      created_at.duckdb_type = LogicalType::TIMESTAMP_TZ;
+      table.columns.push_back(std::move(created_at));
+
+      CodaColumnInfo updated_at;
+      updated_at.id = "updatedAt";
+      updated_at.name = "updatedAt";
+      updated_at.row_metadata = true;
+      updated_at.calculated = true;
+      updated_at.duckdb_type = LogicalType::TIMESTAMP_TZ;
+      table.columns.push_back(std::move(updated_at));
+    }
+  }
 
   CreateSchemaInfo schema_info;
   schema_info.SetQualifiedName(

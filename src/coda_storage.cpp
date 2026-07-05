@@ -17,6 +17,21 @@ static string GetAttachOption(AttachOptions &attach_options,
   return entry->second.ToString();
 }
 
+static bool GetBooleanAttachOption(AttachOptions &attach_options,
+                                   const string &name) {
+  auto value = StringUtil::Lower(GetAttachOption(attach_options, name));
+  if (value.empty()) {
+    return false;
+  }
+  if (value == "true" || value == "1") {
+    return true;
+  }
+  if (value == "false" || value == "0") {
+    return false;
+  }
+  throw InvalidInputException("Coda attach option %s must be a boolean", name);
+}
+
 static string ResolveToken(ClientContext &context, const string &doc_id,
                            AttachOptions &attach_options) {
   auto token = GetAttachOption(attach_options, "token");
@@ -54,7 +69,10 @@ static unique_ptr<Catalog> CodaAttach(optional_ptr<StorageExtensionInfo>,
   if (api_base.empty()) {
     api_base = "https://coda.io/apis/v1";
   }
-  return make_uniq<CodaCatalog>(db, context, doc_id, token, api_base);
+  auto include_row_metadata =
+      GetBooleanAttachOption(attach_options, "include_row_metadata");
+  return make_uniq<CodaCatalog>(db, context, doc_id, token, api_base,
+                                include_row_metadata);
 }
 
 static unique_ptr<TransactionManager>

@@ -27,6 +27,21 @@ You can also pass credentials at attach time:
 ATTACH 'doc-id' AS coda_doc (TYPE coda, TOKEN 'coda-api-token');
 ```
 
+To expose Coda's row metadata as table columns, enable `INCLUDE_ROW_METADATA` when attaching:
+
+```sql
+ATTACH 'doc-id' AS coda_doc (
+    TYPE coda,
+    TOKEN 'coda-api-token',
+    INCLUDE_ROW_METADATA true
+);
+
+SELECT "Task", createdAt, updatedAt FROM coda_doc.main."Tasks";
+```
+
+With this option enabled, every Coda table includes `createdAt` and `updatedAt` columns. Both columns are
+`TIMESTAMP WITH TIME ZONE` values and are read-only.
+
 The initial version intentionally exposes only Coda tables. DDL is not supported: the extension does not create, drop,
 or alter Coda tables.
 
@@ -43,6 +58,8 @@ responses, DML request bodies, and non-crashing error handling for bad HTTP/JSON
 ## Notes
 
 - Coda row IDs are surfaced internally as DuckDB's virtual `rowid` and are used for updates and deletes.
+- Coda row metadata is omitted by default. Use `INCLUDE_ROW_METADATA true` on `ATTACH` to include `createdAt` and
+  `updatedAt` columns.
 - Coda writes are asynchronous. DML reports rows accepted by the Coda API, not rows fully materialized in the doc.
 - Complex Coda values are represented as JSON text when they cannot be losslessly mapped to a scalar DuckDB type.
 - The extension depends on DuckDB's `httpfs` extension for HTTP transport.
