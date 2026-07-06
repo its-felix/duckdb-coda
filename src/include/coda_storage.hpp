@@ -6,7 +6,7 @@ namespace duckdb {
 
 class CodaStorageExtension : public StorageExtension {
 public:
-  CodaStorageExtension();
+	CodaStorageExtension();
 };
 
 } // namespace duckdb

@@ -24,6 +24,8 @@ build_loadable_extension(${TARGET_NAME} "-warnings" ${EXTENSION_SOURCES})
 
 target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
 target_link_libraries(${TARGET_NAME}_loadable_extension CURL::libcurl)
+target_link_libraries(${EXTENSION_NAME} duckdb_yyjson)
+target_link_libraries(${TARGET_NAME}_loadable_extension duckdb_yyjson)
 
 install(
   TARGETS ${EXTENSION_NAME}

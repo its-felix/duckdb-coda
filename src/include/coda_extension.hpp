@@ -6,8 +6,8 @@ namespace duckdb {
 
 class CodaExtension : public Extension {
 public:
-  void Load(ExtensionLoader &loader) override;
-  std::string Name() override;
+	void Load(ExtensionLoader &loader) override;
+	std::string Name() override;
 };
 
 } // namespace duckdb
