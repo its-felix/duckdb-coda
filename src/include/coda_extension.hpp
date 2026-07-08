@@ -1,13 +1,13 @@
 #pragma once
 
-#include "duckdb/main/extension.hpp"
+#ifndef RUST_BRIDGE_EXTENSION_CLASS
+#define RUST_BRIDGE_EXTENSION_CLASS CodaExtension
+#define RUST_BRIDGE_EXTENSION_CLASS_DEFINED_BY_CODA_WRAPPER
+#endif
 
-namespace duckdb {
+#include "rust_bridge_duckdb_extension.hpp"
 
-class CodaExtension : public Extension {
-public:
-	void Load(ExtensionLoader &loader) override;
-	std::string Name() override;
-};
-
-} // namespace duckdb
+#ifdef RUST_BRIDGE_EXTENSION_CLASS_DEFINED_BY_CODA_WRAPPER
+#undef RUST_BRIDGE_EXTENSION_CLASS
+#undef RUST_BRIDGE_EXTENSION_CLASS_DEFINED_BY_CODA_WRAPPER
+#endif
