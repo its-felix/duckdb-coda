@@ -45,18 +45,41 @@ With this option enabled, every Coda table includes `createdAt` and `updatedAt` 
 The initial version intentionally exposes only Coda tables. DDL is not supported: the extension does not create, drop,
 or alter Coda tables.
 
+## Repository Layout
+
+- `src/` contains the Rust extension implementation, C ABI exports, API parsing, and Coda/Superhuman Docs behavior.
+- `src/cpp/` contains the DuckDB C++ storage extension plumbing.
+- `src/include/` contains the public C ABI and C++ bridge headers.
+- `test/sql/` contains DuckDB sqllogictest files loaded through `extension_config.cmake`.
+- `Cargo.toml` builds the Rust static library linked by the DuckDB C++ extension.
+
 ## Testing
 
 ```sh
-make test_debug T=test/sql/coda_offline.test
+cargo test
+make release
+make test
+```
+
+`cargo test` runs the Rust unit tests for the ABI implementation, request body generation, and response parsing. The
+DuckDB build invokes Cargo to produce a Rust static library and links it into the loadable extension.
+
+The DuckDB extension Makefile targets remain available:
+
+```sh
+make verify
 make test_coda_http_mock
 make test_coda_http_real
 ```
 
-The HTTP mock test starts a local Coda-like server and verifies request paths, query parameters, auth headers, read
-responses, DML request bodies, and non-crashing error handling for bad HTTP/JSON responses.
+`make verify` runs the Rust tests and a release build. `make test_coda_http_mock` runs the Rust tests plus ignored
+DuckDB integration tests against a local mock HTTP server through `API_BASE`. It expects
+`build/release/duckdb` and `build/release/extension/coda/coda.duckdb_extension` to exist; run `make release` first
+when those binaries are missing or stale. `make test_coda_http_real` runs a release build plus the ignored live Coda API
+integration test.
 
-The real Coda integration test reads `CODA_TEST_API_TOKEN` from the environment or local `.env`. Set
+The real Coda integration test reads `CODA_TEST_API_TOKEN` from the environment. `make test_coda_http_real` exports a
+local `.env` file before running the test, matching the same environment variables provided by CI. Set
 `CODA_TEST_DOC_ID` when the token is restricted to a specific doc; the harness creates a temporary per-run page in that
 doc, creates test table content on the page, and deletes the page afterwards.
 
@@ -66,5 +89,7 @@ doc, creates test table content on the page, and deletes the page afterwards.
 - Coda row metadata is omitted by default. Use `INCLUDE_ROW_METADATA true` on `ATTACH` to include `createdAt` and
   `updatedAt` columns.
 - Coda writes are asynchronous. DML reports rows accepted by the Coda API, not rows fully materialized in the doc.
+- Explicit DuckDB transactions are not supported for attached Coda databases. Use autocommit statements so the extension
+  does not imply rollback semantics that Coda cannot provide.
 - Complex Coda values are represented as JSON text when they cannot be losslessly mapped to a scalar DuckDB type.
-- The extension depends on DuckDB's `httpfs` extension for HTTP transport.
+- API request construction uses the `superhuman-docs` Rust SDK at tag `v0.2.0`.

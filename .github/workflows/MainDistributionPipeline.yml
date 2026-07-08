@@ -30,6 +30,8 @@ jobs:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       ci_tools_version: v1.5-variegata
       extension_name: coda
+      extra_toolchains: 'rust'
+      use_merged_vcpkg_manifest: '1'
 
   code-quality-check:
     name: Code Quality Check
@@ -39,4 +41,5 @@ jobs:
       duckdb_version: ${{ needs.get-duckdb-version.outputs.duckdb_version }}
       ci_tools_version: v1.5-variegata
       extension_name: coda
+      extra_toolchains: 'rust'
       format_checks: 'format'

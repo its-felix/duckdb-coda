@@ -27,6 +27,9 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Set up VCPKG
         run: |
           make setup-vcpkg
@@ -39,8 +42,11 @@ jobs:
           test -n "$CODA_TEST_API_TOKEN"
           test -n "$CODA_TEST_DOC_ID"
 
+      - name: Run cargo fmt check
+        run: cargo fmt --check
+
       - name: Run mocked Coda API tests
-        run: make test_coda_http_mock
+        run: cargo test
 
       - name: Run real Coda API tests
         run: make test_coda_http_real
