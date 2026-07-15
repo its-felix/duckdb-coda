@@ -63,9 +63,9 @@ static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretIn
 	RustBridgeSecretConfig config;
 	{
 		lock_guard<mutex> lock(SecretConfigLock());
-		auto entry = SecretConfigs().find(input.type);
+		auto entry = SecretConfigs().find(input.type.GetIdentifierName());
 		if (entry == SecretConfigs().end()) {
-			throw InvalidInputException("%s", SecretConfigMissingMessage(input.type));
+			throw InvalidInputException("%s", SecretConfigMissingMessage(input.type.GetIdentifierName()));
 		}
 		config = entry->second;
 	}
@@ -78,12 +78,13 @@ static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretIn
 	for (auto &named_param : input.options) {
 		auto canonical_name = CanonicalSecretParameterName(config.secret_key, named_param.first);
 		if (!canonical_name.empty()) {
-			secret->secret_map[canonical_name] = named_param.second.ToString();
+			secret->secret_map[Identifier(canonical_name)] = named_param.second.ToString();
 		} else {
-			throw InvalidInputException("%s", UnknownSecretParameterMessage(input.type, named_param.first));
+			throw InvalidInputException(
+			    "%s", UnknownSecretParameterMessage(input.type.GetIdentifierName(), named_param.first));
 		}
 	}
-	secret->redact_keys = {config.secret_key};
+	secret->redact_keys = {Identifier(config.secret_key)};
 	return std::move(secret);
 }
 

@@ -3,6 +3,7 @@
 #include "rust_bridge_string.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -41,8 +42,6 @@ void RustBridgeCatalog::LoadCatalog(ClientContext &context) {
 	catalog_info = client.ListTables(attach_config.IncludeSystemColumns());
 
 	CreateSchemaInfo schema_info;
-	schema_info.catalog = INVALID_CATALOG;
-	schema_info.schema = DEFAULT_SCHEMA;
 	main_schema = make_uniq<RustBridgeSchemaCatalogEntry>(context, *this, schema_info, catalog_info);
 }
 
@@ -124,7 +123,7 @@ PhysicalOperator &RustBridgeCatalog::PlanDelete(ClientContext &context, Physical
 		throw NotImplementedException("%s", rust_ext_dml_not_supported_message(RUST_EXT_DML_DELETE));
 	}
 	auto &bound_ref = op.expressions[0]->Cast<BoundReferenceExpression>();
-	auto &del = planner.Make<RustBridgeDelete>(op, op.table.Cast<RustBridgeTableCatalogEntry>(), bound_ref.index);
+	auto &del = planner.Make<RustBridgeDelete>(op, op.table.Cast<RustBridgeTableCatalogEntry>(), bound_ref.Index());
 	del.children.push_back(plan);
 	return del;
 }

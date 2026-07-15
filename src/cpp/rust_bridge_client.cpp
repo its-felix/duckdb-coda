@@ -37,8 +37,8 @@ RustBridgeCatalogResponse RustBridgeClient::ListTables(bool include_system_colum
 RustBridgeScanHandle RustBridgeClient::OpenScan(RustExtString table_id, const RustBridgeScanRequest &request) {
 	void *handle = nullptr;
 	RustExtError error;
-	RustExtScanRequest rust_bridge_request {
-	    BorrowRustBridgeString(request.filter), BorrowRustBridgeString(request.order), request.limit};
+	RustExtScanRequest rust_bridge_request {BorrowRustBridgeString(request.filter),
+	                                        BorrowRustBridgeString(request.order), request.limit};
 	if (!rust_ext_scan_open(config, table_id, rust_bridge_request, &handle, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
@@ -115,7 +115,7 @@ idx_t RustBridgeClient::UpdateRows(const RustBridgeTableInfo &table, DataChunk &
 				Value value;
 				if (expressions[expr_idx]->GetExpressionType() == ExpressionType::BOUND_REF) {
 					auto &binding = expressions[expr_idx]->Cast<BoundReferenceExpression>();
-					value = chunk.GetValue(binding.index, row_idx);
+					value = chunk.GetValue(binding.Index(), row_idx);
 				} else if (expressions[expr_idx]->GetExpressionType() == ExpressionType::VALUE_DEFAULT) {
 					value = Value(table.columns[col_idx].duckdb_type);
 				} else {
@@ -131,8 +131,7 @@ idx_t RustBridgeClient::UpdateRows(const RustBridgeTableInfo &table, DataChunk &
 	size_t affected_count = 0;
 	if (!rust_ext_client_update_rows(config, table.Raw().id, rust_bridge_row_ids.data(), rust_bridge_row_ids.size(),
 	                                 update_columns.data(), update_columns.size(), values.data(),
-	                                 table.Raw().capabilities,
-	                                 &affected_count, &error)) {
+	                                 table.Raw().capabilities, &affected_count, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
 	return affected_count;

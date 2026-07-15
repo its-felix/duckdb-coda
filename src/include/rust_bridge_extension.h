@@ -240,16 +240,16 @@ const char *rust_ext_scan_query_label(void);
 const char *rust_ext_scan_sort_label(void);
 const char *rust_ext_scan_limit_label(void);
 const char *rust_ext_scan_column_index_out_of_range_message(void);
-bool rust_ext_scan_open(RustExtClientConfig config, RustExtString table_id, RustExtScanRequest request,
-                        void **out, RustExtError *err);
+bool rust_ext_scan_open(RustExtClientConfig config, RustExtString table_id, RustExtScanRequest request, void **out,
+                        RustExtError *err);
 bool rust_ext_scan_next(void *scan, RustExtScanBatch *out, RustExtError *err);
 void rust_ext_scan_close(void *scan);
 
 bool rust_ext_client_load_catalog(RustExtClientConfig config, RustExtCatalog *out, RustExtError *err);
-bool rust_ext_client_insert_rows(RustExtClientConfig config, RustExtString table_id,
-                                 const RustExtWriteColumn *columns, size_t column_count,
-                                 const RustExtInputValue *values, size_t row_count, size_t value_column_count,
-                                 uint32_t table_capabilities, size_t *affected_count, RustExtError *err);
+bool rust_ext_client_insert_rows(RustExtClientConfig config, RustExtString table_id, const RustExtWriteColumn *columns,
+                                 size_t column_count, const RustExtInputValue *values, size_t row_count,
+                                 size_t value_column_count, uint32_t table_capabilities, size_t *affected_count,
+                                 RustExtError *err);
 bool rust_ext_client_update_rows(RustExtClientConfig config, RustExtString table_id, const RustExtString *row_ids,
                                  size_t row_count, const RustExtWriteColumn *columns, size_t column_count,
                                  const RustExtInputValue *values, uint32_t table_capabilities, size_t *affected_count,
