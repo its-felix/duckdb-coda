@@ -1,3 +1,4 @@
+use crate::attach::read_environment_variable;
 use crate::ffi::{
     alloc_string, slice_from_raw_parts, RustExtClientConfig, RustExtColumn, RustExtInputValue,
     RustExtString, RustExtWriteColumn, RUST_EXT_COLUMN_EDITABLE, RUST_EXT_COLUMN_SORT_ASC,
@@ -114,6 +115,15 @@ fn token_validation_uses_whoami_status() {
 }
 
 #[test]
+fn token_environment_variable_is_read_eagerly() {
+    let name = format!("DUCKDB_CODA_TOKEN_ENV_TEST_{}", std::process::id());
+    env::set_var(&name, "resolved-token");
+    assert_eq!(read_environment_variable(&name).unwrap(), "resolved-token");
+    env::remove_var(&name);
+    assert!(read_environment_variable(&name).is_err());
+}
+
+#[test]
 #[ignore]
 fn duckdb_mock_coda_scan_metadata_and_dml() {
     let server = MockCodaServer::start();
@@ -159,6 +169,32 @@ fn duckdb_mock_coda_scan_metadata_and_dml() {
             && request.path == "/docs/mock-doc/tables/tbl1/rows"
             && request.body.contains("\"r2\"")),
         "expected delete request, got {requests:#?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_coda_token_env_for_attach() {
+    let server = MockCodaServer::start();
+    let env_name = "DUCKDB_CODA_MOCK_API_TOKEN";
+    let sql = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS coda_attach_env
+             (TYPE coda, TOKEN_ENV {}, API_BASE {});
+         SELECT count(*) FROM coda_attach_env.main.\"Tasks\";",
+        sql_literal(extension_path()),
+        sql_literal(env_name),
+        sql_literal(&server.base_url())
+    );
+    let output = run_duckdb_with_env(&sql, env_name, "mock-token");
+    assert!(output.lines().any(|line| line == "2"), "{output}");
+    assert!(
+        server.requests().iter().all(|request| request
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("Authorization: Bearer mock-token"))),
+        "resolved environment token was not used for every request: {:#?}",
+        server.requests()
     );
 }
 
@@ -745,7 +781,17 @@ fn run_duckdb_metadata_case(resource: &str, credential: &str, endpoint: &str, ta
 }
 
 fn run_duckdb(sql: &str) -> String {
-    let output = Command::new("build/release/duckdb")
+    run_duckdb_command(&mut Command::new("build/release/duckdb"), sql)
+}
+
+fn run_duckdb_with_env(sql: &str, name: &str, value: &str) -> String {
+    let mut command = Command::new("build/release/duckdb");
+    command.env(name, value);
+    run_duckdb_command(&mut command, sql)
+}
+
+fn run_duckdb_command(command: &mut Command, sql: &str) -> String {
+    let output = command
         .args(["-batch", "-csv", ":memory:", "-c", sql])
         .output()
         .expect("failed to run build/release/duckdb; run make release first");

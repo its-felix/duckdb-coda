@@ -1,6 +1,6 @@
 use std::ffi::{c_char, c_void};
 
-use crate::attach::resolve_attach;
+use crate::attach::{read_environment_variable, resolve_attach};
 use crate::client::{load_catalog, ScanHandle};
 use crate::constants::*;
 use crate::ffi::*;
@@ -80,6 +80,27 @@ pub extern "C" fn rust_ext_validate_secret_token(
     ffi_bool(err, "failed to validate Coda secret", || {
         validate_token(str_from_raw(token_ptr, token_len))
     })
+}
+
+#[no_mangle]
+pub extern "C" fn rust_ext_read_environment_variable(
+    name_ptr: *const c_char,
+    name_len: usize,
+    out: *mut RustExtString,
+    err: *mut RustExtError,
+) -> bool {
+    ffi_bool(
+        err,
+        "failed to resolve Coda token environment variable",
+        || {
+            write_out(
+                out,
+                alloc_string(&read_environment_variable(str_from_raw(
+                    name_ptr, name_len,
+                ))?),
+            )
+        },
+    )
 }
 
 #[no_mangle]
@@ -214,6 +235,7 @@ pub extern "C" fn rust_ext_extension_load(
             c_static(EXTENSION_NAME),
             c_static(SECRET_SCOPE_PREFIX_C),
             c_static(TOKEN_OPTION),
+            c_static(TOKEN_ENV_OPTION),
             err,
         ) {
             return Err("failed to register config secret".to_string());

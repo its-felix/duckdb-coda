@@ -296,6 +296,7 @@ pub struct RustExtDuckDbHost {
         *const c_char,
         *const c_char,
         *const c_char,
+        *const c_char,
         *mut RustExtError,
     ) -> bool,
     pub(crate) register_storage_extension:
@@ -336,6 +337,7 @@ impl RustExtDuckDbHost {
         unsafe { (self.set_description)(loader, description, err) }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_config_secret(
         &self,
         loader: *mut c_void,
@@ -344,6 +346,7 @@ impl RustExtDuckDbHost {
         extension: *const c_char,
         default_scope: *const c_char,
         secret_key: *const c_char,
+        secret_env_key: *const c_char,
         err: *mut RustExtError,
     ) -> bool {
         unsafe {
@@ -354,6 +357,7 @@ impl RustExtDuckDbHost {
                 extension,
                 default_scope,
                 secret_key,
+                secret_env_key,
                 err,
             )
         }

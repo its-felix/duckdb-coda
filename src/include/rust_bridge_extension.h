@@ -192,7 +192,8 @@ typedef struct {
 typedef struct {
 	bool (*set_description)(void *loader, const char *description, RustExtError *err);
 	bool (*register_config_secret)(void *loader, const char *secret_type, const char *provider, const char *extension,
-	                               const char *default_scope, const char *secret_key, RustExtError *err);
+	                               const char *default_scope, const char *secret_key, const char *secret_env_key,
+	                               RustExtError *err);
 	bool (*register_storage_extension)(void *loader, const char *extension_name, RustExtError *err);
 } RustExtDuckDbHost;
 
@@ -211,6 +212,7 @@ bool rust_ext_secret_canonical_parameter_name(const char *secret_key_ptr, size_t
                                               const char *parameter_ptr, size_t parameter_len, RustExtString *out,
                                               RustExtError *err);
 bool rust_ext_validate_secret_token(const char *token_ptr, size_t token_len, RustExtError *err);
+bool rust_ext_read_environment_variable(const char *name_ptr, size_t name_len, RustExtString *out, RustExtError *err);
 const char *rust_ext_extension_name(void);
 const char *rust_ext_unsupported_update_expression_message(void);
 const char *rust_ext_row_id_column_name(void);

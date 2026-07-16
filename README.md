@@ -30,6 +30,21 @@ You can also pass credentials at attach time:
 ATTACH 'doc-id' AS coda_doc (TYPE coda, TOKEN 'coda-api-token');
 ```
 
+To read the API token from an environment variable, use `TOKEN_ENV` with the variable's name:
+
+```sql
+CREATE SECRET coda_token (
+    TYPE coda,
+    TOKEN_ENV 'CODA_API_TOKEN'
+);
+
+ATTACH 'doc-id' AS coda_doc (TYPE coda, TOKEN_ENV 'CODA_API_TOKEN');
+```
+
+The environment variable is read eagerly when `CREATE SECRET` or `ATTACH` runs. For a secret, the resolved value is
+stored as the token; the environment variable name is not retained. `TOKEN` and `TOKEN_ENV` cannot be specified
+together.
+
 To expose Coda's row metadata as table columns, enable `INCLUDE_ROW_METADATA` when attaching:
 
 ```sql

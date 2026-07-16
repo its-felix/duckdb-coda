@@ -18,6 +18,7 @@ struct RustBridgeSecretConfig {
 	string extension;
 	string default_scope;
 	string secret_key;
+	string secret_env_key;
 };
 
 static mutex &SecretConfigLock() {
@@ -59,6 +60,15 @@ static string CanonicalSecretParameterName(const string &secret_key, const strin
 	return TakeRustBridgeString(canonical);
 }
 
+static string ReadEnvironmentVariable(const string &name) {
+	RustExtString value;
+	RustExtError error;
+	if (!rust_ext_read_environment_variable(name.c_str(), name.size(), &value, &error)) {
+		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
+	}
+	return TakeRustBridgeString(value);
+}
+
 static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretInput &input) {
 	RustBridgeSecretConfig config;
 	{
@@ -80,17 +90,25 @@ static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretIn
 	for (auto &named_param : input.options) {
 		auto canonical_name = CanonicalSecretParameterName(config.secret_key, named_param.first);
 		if (!canonical_name.empty()) {
-			auto value = named_param.second.ToString();
-			secret->secret_map[canonical_name] = value;
-			if (canonical_name == config.secret_key) {
-				credential = std::move(value);
-				credential_provided = true;
+			if (credential_provided) {
+				throw InvalidInputException("TOKEN and TOKEN_ENV cannot both be specified");
 			}
-		} else {
+			credential = named_param.second.ToString();
+			credential_provided = true;
+			continue;
+		}
+		canonical_name = CanonicalSecretParameterName(config.secret_env_key, named_param.first);
+		if (canonical_name.empty()) {
 			throw InvalidInputException("%s", UnknownSecretParameterMessage(input.type, named_param.first));
 		}
+		if (credential_provided) {
+			throw InvalidInputException("TOKEN and TOKEN_ENV cannot both be specified");
+		}
+		credential = ReadEnvironmentVariable(named_param.second.ToString());
+		credential_provided = true;
 	}
 	if (credential_provided) {
+		secret->secret_map[config.secret_key] = credential;
 		RustExtError error;
 		if (!rust_ext_validate_secret_token(credential.c_str(), credential.size(), &error)) {
 			throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
@@ -113,12 +131,13 @@ static bool HostSetDescription(void *loader_ptr, const char *description, RustEx
 
 static bool HostRegisterConfigSecret(void *loader_ptr, const char *secret_type, const char *provider,
                                      const char *extension, const char *default_scope, const char *secret_key,
-                                     RustExtError *err) {
+                                     const char *secret_env_key, RustExtError *err) {
 	try {
 		auto &loader = *reinterpret_cast<ExtensionLoader *>(loader_ptr);
 		{
 			lock_guard<mutex> lock(SecretConfigLock());
-			SecretConfigs()[secret_type] = RustBridgeSecretConfig {provider, extension, default_scope, secret_key};
+			SecretConfigs()[secret_type] =
+			    RustBridgeSecretConfig {provider, extension, default_scope, secret_key, secret_env_key};
 		}
 
 		SecretType type;
@@ -130,6 +149,7 @@ static bool HostRegisterConfigSecret(void *loader_ptr, const char *secret_type, 
 
 		CreateSecretFunction config_fun = {secret_type, provider, CreateConfigSecret};
 		config_fun.named_parameters[secret_key] = LogicalType::VARCHAR;
+		config_fun.named_parameters[secret_env_key] = LogicalType::VARCHAR;
 		loader.RegisterFunction(config_fun);
 		return true;
 	} catch (std::exception &ex) {
