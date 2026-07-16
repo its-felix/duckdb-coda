@@ -8,18 +8,52 @@
 
 namespace duckdb {
 
-inline LogicalType RustBridgeDuckDBLogicalType(int32_t rust_bridge_type) {
+inline LogicalType RustBridgeDuckDBScalarLogicalType(int32_t rust_bridge_type) {
 	switch (static_cast<RustExtLogicalType>(rust_bridge_type)) {
 	case RUST_EXT_LOGICAL_BOOLEAN:
 		return LogicalType::BOOLEAN;
-	case RUST_EXT_LOGICAL_DOUBLE:
-		return LogicalType::DOUBLE;
+	case RUST_EXT_LOGICAL_DECIMAL:
+		return LogicalType::DECIMAL(38, 20);
 	case RUST_EXT_LOGICAL_TIMESTAMP_TZ:
 		return LogicalType::TIMESTAMP_TZ;
+	case RUST_EXT_LOGICAL_DATE:
+		return LogicalType::DATE;
+	case RUST_EXT_LOGICAL_TIME:
+		return LogicalType::TIME;
+	case RUST_EXT_LOGICAL_INTERVAL:
+		return LogicalType::INTERVAL;
+	case RUST_EXT_LOGICAL_CURRENCY:
+		return LogicalType::STRUCT({{"currency", LogicalType::VARCHAR}, {"amount", LogicalType::DECIMAL(38, 20)}});
+	case RUST_EXT_LOGICAL_IMAGE:
+		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR},
+		                            {"url", LogicalType::VARCHAR},
+		                            {"height", LogicalType::DOUBLE},
+		                            {"width", LogicalType::DOUBLE},
+		                            {"status", LogicalType::VARCHAR}});
+	case RUST_EXT_LOGICAL_PERSON:
+		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR}, {"email", LogicalType::VARCHAR}});
+	case RUST_EXT_LOGICAL_HYPERLINK:
+		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR}, {"url", LogicalType::VARCHAR}});
+	case RUST_EXT_LOGICAL_LOOKUP:
+		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR},
+		                            {"url", LogicalType::VARCHAR},
+		                            {"tableId", LogicalType::VARCHAR},
+		                            {"tableUrl", LogicalType::VARCHAR},
+		                            {"rowId", LogicalType::VARCHAR}});
+	case RUST_EXT_LOGICAL_JSON:
+		return LogicalType::JSON();
 	case RUST_EXT_LOGICAL_VARCHAR:
 	default:
 		return LogicalType::VARCHAR;
 	}
+}
+
+inline LogicalType RustBridgeDuckDBLogicalType(int32_t rust_bridge_type, uint32_t capabilities) {
+	auto scalar_type = RustBridgeDuckDBScalarLogicalType(rust_bridge_type);
+	if ((capabilities & RUST_EXT_COLUMN_ARRAY) != 0) {
+		return LogicalType::LIST(std::move(scalar_type));
+	}
+	return scalar_type;
 }
 
 struct RustBridgeColumnInfo {

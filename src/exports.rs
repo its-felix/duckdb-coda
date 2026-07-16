@@ -293,6 +293,18 @@ pub extern "C" fn rust_ext_scan_value(
 }
 
 #[no_mangle]
+pub extern "C" fn rust_ext_free_scan_value(value: RustExtScanValue) {
+    if value.value_owned {
+        value.value.free();
+    }
+    for item in vec_from_raw_parts(value.array_values, value.array_count) {
+        if !item.is_null {
+            item.value.free();
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn rust_ext_scan_sort_by(column: RustExtColumn, out: *mut RustExtString) -> bool {
     let id = column.id.as_str();
     if column.capabilities & RUST_EXT_COLUMN_SORT_ASC != 0 {

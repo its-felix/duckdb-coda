@@ -103,7 +103,7 @@ pub(crate) fn list_rows(
             query: non_empty_string(&request.query),
             sort_by: non_empty_string(&request.sort_by),
             use_column_names: Some(false),
-            value_format: Some("simpleWithArrays".to_string()),
+            value_format: Some("rich".to_string()),
             visible_only: Some(false),
             limit: Some(request.limit as i64),
             page_token: non_empty_string(&request.page_token),

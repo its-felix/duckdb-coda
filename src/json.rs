@@ -12,30 +12,27 @@ pub(crate) fn json_value_type(value: &Value) -> u8 {
 }
 
 pub(crate) fn json_value_string(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(inner) => inner.to_string(),
-        Value::String(inner) => inner.clone(),
-        _ => value.to_string(),
-    }
+    value.to_string()
 }
 
-pub(crate) fn logical_type(format_type: &str, is_array: bool) -> i32 {
-    if is_array {
-        return 0;
+pub(crate) fn logical_type(format_type: &str, _is_array: bool) -> i32 {
+    match format_type.to_ascii_lowercase().as_str() {
+        "checkbox" => RUST_EXT_LOGICAL_BOOLEAN,
+        "text" | "email" | "select" => RUST_EXT_LOGICAL_VARCHAR,
+        "number" | "percent" | "slider" | "scale" => RUST_EXT_LOGICAL_DECIMAL,
+        "date" => RUST_EXT_LOGICAL_DATE,
+        "datetime" => RUST_EXT_LOGICAL_TIMESTAMP_TZ,
+        "time" => RUST_EXT_LOGICAL_TIME,
+        "duration" => RUST_EXT_LOGICAL_INTERVAL,
+        "currency" => RUST_EXT_LOGICAL_CURRENCY,
+        "image" => RUST_EXT_LOGICAL_IMAGE,
+        "person" => RUST_EXT_LOGICAL_PERSON,
+        // The public API currently calls this format `link`; accept `hyperlink` as well
+        // because that is the corresponding rich value's terminology.
+        "link" | "hyperlink" => RUST_EXT_LOGICAL_HYPERLINK,
+        "lookup" => RUST_EXT_LOGICAL_LOOKUP,
+        _ => RUST_EXT_LOGICAL_JSON,
     }
-    if format_type.eq_ignore_ascii_case("checkbox") {
-        return 1;
-    }
-    if [
-        "number", "currency", "percent", "duration", "slider", "scale",
-    ]
-    .iter()
-    .any(|candidate| format_type.eq_ignore_ascii_case(candidate))
-    {
-        return 2;
-    }
-    0
 }
 
 pub(crate) fn table_list_from_json(body: &str) -> Result<RustExtTableList, String> {
@@ -279,7 +276,7 @@ pub(crate) fn append_row_metadata(columns: &mut Vec<RustExtColumn>) {
             name: alloc_string(name),
             type_name: alloc_string("timestampTz"),
             capabilities,
-            logical_type: 3,
+            logical_type: RUST_EXT_LOGICAL_TIMESTAMP_TZ,
             ..Default::default()
         });
     }

@@ -16,6 +16,7 @@ jobs:
     env:
       CODA_TEST_API_TOKEN: ${{ secrets.CODA_TEST_API_TOKEN }}
       CODA_TEST_DOC_ID: ${{ secrets.CODA_TEST_DOC_ID }}
+      CODA_TEST_WIDE_TABLE_ID: ${{ secrets.CODA_TEST_WIDE_TABLE_ID }}
       USE_MERGED_VCPKG_MANIFEST: "1"
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       GEN: ninja
@@ -41,6 +42,7 @@ jobs:
         run: |
           test -n "$CODA_TEST_API_TOKEN"
           test -n "$CODA_TEST_DOC_ID"
+          test -n "$CODA_TEST_WIDE_TABLE_ID"
 
       - name: Run cargo fmt check
         run: cargo fmt --check

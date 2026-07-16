@@ -63,6 +63,29 @@ With this option enabled, every Coda table includes `createdAt` and `updatedAt` 
 The initial version intentionally exposes only Coda tables. DDL is not supported: the extension does not create, drop,
 or alter Coda tables.
 
+## Column Types
+
+The extension requests rich row values and maps scalar Coda column formats to DuckDB as follows:
+
+| Coda format | DuckDB type |
+| --- | --- |
+| `checkbox` | `BOOLEAN` |
+| `text`, `email`, `select` | `VARCHAR` |
+| `number`, `percent`, `slider`, `scale` | `DECIMAL(38, 20)` |
+| `date` | `DATE` |
+| `dateTime` | `TIMESTAMP WITH TIME ZONE` |
+| `time` | `TIME` |
+| `duration` | `INTERVAL` |
+| `currency` | `STRUCT(currency VARCHAR, amount DECIMAL(38, 20))` |
+| `image` | `STRUCT(name VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)` |
+| `person` | `STRUCT(name VARCHAR, email VARCHAR)` |
+| `link` | `STRUCT(name VARCHAR, url VARCHAR)` |
+| `lookup` | `STRUCT(name VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)` |
+
+Array-valued columns use the same mapping for their elements and expose a DuckDB array type; for example, an array
+`duration` column becomes `INTERVAL[]`. A scalar `select` exposes its selected value as `VARCHAR`. Unsupported scalar
+formats map to `JSON`, and arrays of unsupported values become `JSON[]`.
+
 ## Repository Layout
 
 - `src/` contains the Rust extension implementation, C ABI exports, API parsing, and Coda/Superhuman Docs behavior.
@@ -96,10 +119,17 @@ DuckDB integration tests against a local mock HTTP server through `API_BASE`. It
 when those binaries are missing or stale. `make test_coda_http_real` runs a release build plus the ignored live Coda API
 integration test.
 
-The real Coda integration test reads `CODA_TEST_API_TOKEN` from the environment. `make test_coda_http_real` exports a
-local `.env` file before running the test, matching the same environment variables provided by CI. Set
-`CODA_TEST_DOC_ID` when the token is restricted to a specific doc; the harness creates a temporary per-run page in that
-doc, creates test table content on the page, and deletes the page afterwards.
+The real Coda integration tests read `CODA_TEST_API_TOKEN`, `CODA_TEST_DOC_ID`, and `CODA_TEST_WIDE_TABLE_ID` from the
+environment. `make test_coda_http_real` exports a local `.env` file before running the tests, matching the same
+environment variables provided by CI. The smoke-test harness creates a temporary per-run page in the configured doc,
+creates test table content on the page, and deletes the page afterwards.
+
+The public API cannot create or change column formats, so the rich-value integration test uses a persistent wide-table
+fixture identified by `CODA_TEST_WIDE_TABLE_ID`. It must contain one populated row and scalar columns named `Checkbox`,
+`Text`, `Email`, `Select`, `Number`, `Percent`, `Slider`, `Scale`, `Date`, `DateTime`, `Time`, `Duration`, `Currency`,
+`Image`, `Person`, `Hyperlink`, `Lookup`, and `Other`, with the corresponding Coda formats. `Other` must be a Canvas
+column so the JSON fallback is covered. It must also contain a populated array-valued `duration` column named
+`Durations`. The test validates both the API-reported formats and the resulting DuckDB schema and values.
 
 ## Notes
 
@@ -109,5 +139,5 @@ doc, creates test table content on the page, and deletes the page afterwards.
 - Coda writes are asynchronous. DML reports rows accepted by the Coda API, not rows fully materialized in the doc.
 - Explicit DuckDB transactions are not supported for attached Coda databases. Use autocommit statements so the extension
   does not imply rollback semantics that Coda cannot provide.
-- Complex Coda values are represented as JSON text when they cannot be losslessly mapped to a scalar DuckDB type.
+- Unsupported Coda values use DuckDB's `JSON` type; all array-valued columns preserve their mapped inner type.
 - API request construction uses the `superhuman-docs` Rust SDK at tag `v0.2.0`.

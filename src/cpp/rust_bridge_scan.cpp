@@ -147,32 +147,44 @@ static void RustBridgeScanPushdownComplexFilter(ClientContext &, LogicalGet &get
 	}
 }
 
-static Value ScanValueToValue(const RustExtScanValue &scan_value, const LogicalType &target_type) {
-	if (scan_value.is_null) {
-		return Value(target_type);
+static Value ScanTextToValue(const string &value, const LogicalType &target_type) {
+	if (target_type.IsJSONType()) {
+		auto result = Value(value);
+		result.GetTypeMutable() = target_type;
+		return result;
 	}
-	auto value = RustBridgeString(scan_value.value);
 	if (target_type.id() == LogicalTypeId::VARCHAR) {
 		return Value(value);
 	}
 	try {
-		switch (target_type.id()) {
-		case LogicalTypeId::BOOLEAN:
-			if (scan_value.value_type == RUST_EXT_JSON_BOOLEAN) {
-				return Value::BOOLEAN(scan_value.bool_value);
-			}
-			return Value(value).DefaultCastAs(target_type);
-		case LogicalTypeId::DOUBLE:
-			if (scan_value.has_double_value) {
-				return Value::DOUBLE(scan_value.double_value);
-			}
-			return Value(value).DefaultCastAs(target_type);
-		default:
-			return Value(value).DefaultCastAs(target_type);
-		}
+		return Value(value).DefaultCastAs(target_type);
 	} catch (...) {
 		return Value(target_type);
 	}
+}
+
+static Value ScanValueToValue(const RustExtScanValue &scan_value, const LogicalType &target_type) {
+	if (scan_value.is_null) {
+		return Value(target_type);
+	}
+	if (target_type.id() == LogicalTypeId::LIST) {
+		auto &child_type = ListType::GetChildType(target_type);
+		vector<Value> values;
+		values.reserve(scan_value.array_count);
+		for (idx_t idx = 0; idx < scan_value.array_count; idx++) {
+			auto &array_value = scan_value.array_values[idx];
+			if (array_value.is_null) {
+				values.emplace_back(child_type);
+			} else {
+				values.push_back(ScanTextToValue(RustBridgeString(array_value.value), child_type));
+			}
+		}
+		return Value::LIST(child_type, std::move(values));
+	}
+	if (target_type.id() == LogicalTypeId::BOOLEAN && scan_value.value_type == RUST_EXT_JSON_BOOLEAN) {
+		return Value::BOOLEAN(scan_value.bool_value);
+	}
+	return ScanTextToValue(RustBridgeString(scan_value.value), target_type);
 }
 
 static void RustBridgeScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
@@ -220,7 +232,9 @@ static void RustBridgeScan(ClientContext &, TableFunctionInput &input, DataChunk
 			if (!rust_ext_scan_value(rust_bridge_column, row, &scan_value)) {
 				output.data[out_col].SetValue(out_row, Value(column.duckdb_type));
 			} else {
-				output.data[out_col].SetValue(out_row, ScanValueToValue(scan_value, column.duckdb_type));
+				auto value = ScanValueToValue(scan_value, column.duckdb_type);
+				rust_ext_free_scan_value(scan_value);
+				output.data[out_col].SetValue(out_row, value);
 			}
 		}
 		out_row++;

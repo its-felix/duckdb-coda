@@ -15,6 +15,20 @@ pub(crate) const RUST_EXT_TABLE_UPDATE: u32 = 1 << 2;
 pub(crate) const RUST_EXT_TABLE_DELETE: u32 = 1 << 3;
 pub(crate) const RUST_EXT_TABLE_ROW_ID: u32 = 1 << 4;
 
+pub(crate) const RUST_EXT_LOGICAL_VARCHAR: i32 = 0;
+pub(crate) const RUST_EXT_LOGICAL_BOOLEAN: i32 = 1;
+pub(crate) const RUST_EXT_LOGICAL_DECIMAL: i32 = 2;
+pub(crate) const RUST_EXT_LOGICAL_TIMESTAMP_TZ: i32 = 3;
+pub(crate) const RUST_EXT_LOGICAL_DATE: i32 = 4;
+pub(crate) const RUST_EXT_LOGICAL_TIME: i32 = 5;
+pub(crate) const RUST_EXT_LOGICAL_INTERVAL: i32 = 6;
+pub(crate) const RUST_EXT_LOGICAL_CURRENCY: i32 = 7;
+pub(crate) const RUST_EXT_LOGICAL_IMAGE: i32 = 8;
+pub(crate) const RUST_EXT_LOGICAL_PERSON: i32 = 9;
+pub(crate) const RUST_EXT_LOGICAL_HYPERLINK: i32 = 10;
+pub(crate) const RUST_EXT_LOGICAL_LOOKUP: i32 = 11;
+pub(crate) const RUST_EXT_LOGICAL_JSON: i32 = 12;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RustExtString {
@@ -179,13 +193,21 @@ impl Default for CodaRowsResponse {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct RustExtArrayValue {
+    pub(crate) is_null: bool,
+    pub(crate) value: RustExtString,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct RustExtScanValue {
     pub(crate) is_null: bool,
     pub(crate) value_type: u8,
     pub(crate) bool_value: bool,
-    pub(crate) has_double_value: bool,
-    pub(crate) double_value: f64,
+    pub(crate) value_owned: bool,
     pub(crate) value: RustExtString,
+    pub(crate) array_values: *mut RustExtArrayValue,
+    pub(crate) array_count: usize,
 }
 
 impl Default for RustExtScanValue {
@@ -194,9 +216,10 @@ impl Default for RustExtScanValue {
             is_null: true,
             value_type: 0,
             bool_value: false,
-            has_double_value: false,
-            double_value: 0.0,
+            value_owned: false,
             value: RustExtString::default(),
+            array_values: ptr::null_mut(),
+            array_count: 0,
         }
     }
 }

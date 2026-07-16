@@ -20,8 +20,17 @@ typedef struct {
 typedef enum {
 	RUST_EXT_LOGICAL_VARCHAR = 0,
 	RUST_EXT_LOGICAL_BOOLEAN = 1,
-	RUST_EXT_LOGICAL_DOUBLE = 2,
-	RUST_EXT_LOGICAL_TIMESTAMP_TZ = 3
+	RUST_EXT_LOGICAL_DECIMAL = 2,
+	RUST_EXT_LOGICAL_TIMESTAMP_TZ = 3,
+	RUST_EXT_LOGICAL_DATE = 4,
+	RUST_EXT_LOGICAL_TIME = 5,
+	RUST_EXT_LOGICAL_INTERVAL = 6,
+	RUST_EXT_LOGICAL_CURRENCY = 7,
+	RUST_EXT_LOGICAL_IMAGE = 8,
+	RUST_EXT_LOGICAL_PERSON = 9,
+	RUST_EXT_LOGICAL_HYPERLINK = 10,
+	RUST_EXT_LOGICAL_LOOKUP = 11,
+	RUST_EXT_LOGICAL_JSON = 12
 } RustExtLogicalType;
 
 typedef enum {
@@ -147,11 +156,17 @@ typedef struct {
 
 typedef struct {
 	bool is_null;
+	RustExtString value;
+} RustExtArrayValue;
+
+typedef struct {
+	bool is_null;
 	uint8_t value_type;
 	bool bool_value;
-	bool has_double_value;
-	double double_value;
+	bool value_owned;
 	RustExtString value;
+	RustExtArrayValue *array_values;
+	size_t array_count;
 } RustExtScanValue;
 
 typedef struct {
@@ -236,6 +251,7 @@ bool rust_ext_build_equality_query(const char *column_id_ptr, size_t column_id_l
                                    size_t column_name_len, RustExtInputValue value, RustExtString *out_query,
                                    RustExtString *out_description, RustExtError *err);
 bool rust_ext_scan_value(RustExtColumn column, RustExtRow row, RustExtScanValue *out);
+void rust_ext_free_scan_value(RustExtScanValue value);
 bool rust_ext_scan_sort_by(RustExtColumn column, RustExtString *out);
 bool rust_ext_scan_can_filter_equality(RustExtColumn column);
 const char *rust_ext_scan_function_name(void);
@@ -243,16 +259,16 @@ const char *rust_ext_scan_query_label(void);
 const char *rust_ext_scan_sort_label(void);
 const char *rust_ext_scan_limit_label(void);
 const char *rust_ext_scan_column_index_out_of_range_message(void);
-bool rust_ext_scan_open(RustExtClientConfig config, RustExtString table_id, RustExtScanRequest request,
-                        void **out, RustExtError *err);
+bool rust_ext_scan_open(RustExtClientConfig config, RustExtString table_id, RustExtScanRequest request, void **out,
+                        RustExtError *err);
 bool rust_ext_scan_next(void *scan, RustExtScanBatch *out, RustExtError *err);
 void rust_ext_scan_close(void *scan);
 
 bool rust_ext_client_load_catalog(RustExtClientConfig config, RustExtCatalog *out, RustExtError *err);
-bool rust_ext_client_insert_rows(RustExtClientConfig config, RustExtString table_id,
-                                 const RustExtWriteColumn *columns, size_t column_count,
-                                 const RustExtInputValue *values, size_t row_count, size_t value_column_count,
-                                 uint32_t table_capabilities, size_t *affected_count, RustExtError *err);
+bool rust_ext_client_insert_rows(RustExtClientConfig config, RustExtString table_id, const RustExtWriteColumn *columns,
+                                 size_t column_count, const RustExtInputValue *values, size_t row_count,
+                                 size_t value_column_count, uint32_t table_capabilities, size_t *affected_count,
+                                 RustExtError *err);
 bool rust_ext_client_update_rows(RustExtClientConfig config, RustExtString table_id, const RustExtString *row_ids,
                                  size_t row_count, const RustExtWriteColumn *columns, size_t column_count,
                                  const RustExtInputValue *values, uint32_t table_capabilities, size_t *affected_count,

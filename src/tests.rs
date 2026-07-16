@@ -1,10 +1,8 @@
 use crate::attach::read_environment_variable;
-use crate::ffi::{
-    alloc_string, slice_from_raw_parts, RustExtClientConfig, RustExtColumn, RustExtInputValue,
-    RustExtString, RustExtWriteColumn, RUST_EXT_COLUMN_EDITABLE, RUST_EXT_COLUMN_SORT_ASC,
-    RUST_EXT_TABLE_INSERT,
+use crate::ffi::*;
+use crate::json::{
+    column_list_from_json, free_coda_rows_response, free_columns, logical_type, rows_from_json,
 };
-use crate::json::{column_list_from_json, free_coda_rows_response, free_columns, rows_from_json};
 use crate::mutation::{build_equality_query, insert_body};
 use crate::sdk::{send_request, validate_token_at};
 use serde_json::{json, Value};
@@ -28,7 +26,7 @@ fn parse_columns_and_rows() {
     assert_eq!(columns.count, 1);
     let column_items = slice_from_raw_parts(columns.items, columns.count);
     assert_eq!(column_items[0].id.as_str(), "c-id");
-    assert_eq!(column_items[0].logical_type, 2);
+    assert_eq!(column_items[0].logical_type, RUST_EXT_LOGICAL_CURRENCY);
     free_columns(columns);
 
     let rows = rows_from_json(
@@ -40,6 +38,35 @@ fn parse_columns_and_rows() {
     assert_eq!(row_items[0].cell_count, 3);
     assert_eq!(rows.next_sync_token.as_str(), "sync");
     free_coda_rows_response(rows);
+}
+
+#[test]
+fn documented_column_formats_map_to_duckdb_logical_types() {
+    for (format_type, expected) in [
+        ("checkbox", RUST_EXT_LOGICAL_BOOLEAN),
+        ("text", RUST_EXT_LOGICAL_VARCHAR),
+        ("email", RUST_EXT_LOGICAL_VARCHAR),
+        ("select", RUST_EXT_LOGICAL_VARCHAR),
+        ("number", RUST_EXT_LOGICAL_DECIMAL),
+        ("percent", RUST_EXT_LOGICAL_DECIMAL),
+        ("slider", RUST_EXT_LOGICAL_DECIMAL),
+        ("scale", RUST_EXT_LOGICAL_DECIMAL),
+        ("date", RUST_EXT_LOGICAL_DATE),
+        ("dateTime", RUST_EXT_LOGICAL_TIMESTAMP_TZ),
+        ("time", RUST_EXT_LOGICAL_TIME),
+        ("duration", RUST_EXT_LOGICAL_INTERVAL),
+        ("currency", RUST_EXT_LOGICAL_CURRENCY),
+        ("image", RUST_EXT_LOGICAL_IMAGE),
+        ("person", RUST_EXT_LOGICAL_PERSON),
+        ("link", RUST_EXT_LOGICAL_HYPERLINK),
+        ("hyperlink", RUST_EXT_LOGICAL_HYPERLINK),
+        ("lookup", RUST_EXT_LOGICAL_LOOKUP),
+        ("canvas", RUST_EXT_LOGICAL_JSON),
+    ] {
+        assert_eq!(logical_type(format_type, false), expected, "{format_type}");
+    }
+    assert_eq!(logical_type("number", true), RUST_EXT_LOGICAL_DECIMAL);
+    assert_eq!(logical_type("select", true), RUST_EXT_LOGICAL_VARCHAR);
 }
 
 #[test]
@@ -147,6 +174,12 @@ fn duckdb_mock_coda_scan_metadata_and_dml() {
 
     let requests = server.requests();
     assert!(
+        requests.iter().any(|request| request.method == "GET"
+            && request.path == "/docs/mock-doc/tables/tbl1/rows"
+            && request.query.contains("valueFormat=rich")),
+        "expected rich row values, got {requests:#?}"
+    );
+    assert!(
         requests.iter().any(|request| request.method == "POST"
             && request.path == "/docs/mock-doc/tables/tbl1/rows"
             && request.body.contains("\"Gamma\"")),
@@ -161,7 +194,9 @@ fn duckdb_mock_coda_scan_metadata_and_dml() {
     assert!(
         requests.iter().any(|request| request.method == "PUT"
             && request.path == "/docs/mock-doc/tables/tbl1/rows/r1"
-            && request.body.contains("\"value\":4.5")),
+            && request
+                .body
+                .contains("\"value\":\"4.50000000000000000000\"")),
         "expected update request, got {requests:#?}"
     );
     assert!(
@@ -195,6 +230,82 @@ fn duckdb_mock_coda_token_env_for_attach() {
             .any(|line| line.eq_ignore_ascii_case("Authorization: Bearer mock-token"))),
         "resolved environment token was not used for every request: {:#?}",
         server.requests()
+    );
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_coda_wide_types() {
+    let server = MockCodaServer::start();
+    let table = "coda_doc.main.\"Wide Types\"";
+    let sql = format!(
+        "LOAD {};\
+         ATTACH 'mock-doc' AS coda_doc (TYPE coda, TOKEN 'mock-token', API_BASE {});\
+         SELECT column_name, data_type FROM information_schema.columns \
+         WHERE table_catalog = 'coda_doc' AND table_schema = 'main' AND table_name = 'Wide Types' \
+         ORDER BY ordinal_position;\
+         SELECT \"Checkbox\", \"Text\", \"Email\", \"Select\", \
+                \"Number\", \"Percent\", \"Slider\", \"Scale\", \
+                \"Date\", \"DateTime\", \"Time\", epoch(\"Duration\"), \
+                \"Currency\".currency, \"Currency\".amount, \
+                \"Image\".name, \"Image\".url, \"Image\".height, \"Image\".width, \"Image\".status, \
+                \"Person\".name, \"Person\".email, \
+                \"Hyperlink\".name, \"Hyperlink\".url, \
+                \"Lookup\".name, \"Lookup\".url, \"Lookup\".tableId, \"Lookup\".tableUrl, \"Lookup\".rowId, \
+                CAST(\"Other\" AS VARCHAR), CAST(\"MultiSelect\" AS VARCHAR), \
+                list_transform(\"Durations\", value -> epoch(value)), \
+                list_transform(\"Currencies\", value -> value.currency), CAST(\"Others\" AS VARCHAR) \
+         FROM {table};",
+        sql_literal(extension_path()),
+        sql_literal(&server.base_url()),
+    );
+    let output = run_duckdb(&sql);
+    for expected in [
+        "Checkbox,BOOLEAN",
+        "Text,VARCHAR",
+        "Email,VARCHAR",
+        "Select,VARCHAR",
+        "Number,\"DECIMAL(38,20)\"",
+        "Percent,\"DECIMAL(38,20)\"",
+        "Slider,\"DECIMAL(38,20)\"",
+        "Scale,\"DECIMAL(38,20)\"",
+        "Date,DATE",
+        "DateTime,TIMESTAMP WITH TIME ZONE",
+        "Time,TIME",
+        "Duration,INTERVAL",
+        "Currency,\"STRUCT(currency VARCHAR, amount DECIMAL(38,20))\"",
+        "Image,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)\"",
+        "Person,\"STRUCT(\"\"name\"\" VARCHAR, email VARCHAR)\"",
+        "Hyperlink,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR)\"",
+        "Lookup,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)\"",
+        "Other,JSON",
+        "MultiSelect,VARCHAR[]",
+        "Durations,INTERVAL[]",
+        "Currencies,\"STRUCT(currency VARCHAR, amount DECIMAL(38,20))[]\"",
+        "Others,JSON[]",
+        "true,Alpha,ada@example.com,Open",
+        "123456789012345678.12345678901234567890",
+        "2024-01-02,2024-01-02 03:04:05+00,03:04:05,43200.0,USD,12.34000000000000000000",
+        "photo.png,https://example.com/photo.png,480.0,640.0,live",
+        "Ada Lovelace,ada@example.com,Example,https://example.com",
+        "Referenced row,https://coda.io/row,tbl-related,https://coda.io/table,row-related",
+        "nested",
+        "One",
+        "[43200.0, 86400.0]",
+        "[USD, EUR]",
+    ] {
+        assert!(
+            output.contains(expected),
+            "expected wide-type output to contain '{expected}', got:\n{output}"
+        );
+    }
+    assert!(
+        server.requests().iter().any(|request| {
+            request.method == "GET"
+                && request.path == "/docs/mock-doc/tables/tbl_wide/rows"
+                && request.query.contains("valueFormat=rich")
+        }),
+        "wide table scan did not request rich values"
     );
 }
 
@@ -275,6 +386,25 @@ fn real_coda_api_smoke() {
     run_duckdb_success_case(&resource, &credential, &endpoint, actual_table_name);
     run_duckdb_metadata_case(&resource, &credential, &endpoint, actual_table_name);
     drop(cleanup);
+}
+
+#[test]
+#[ignore]
+fn real_coda_api_wide_types() {
+    let credential = required_env("CODA_TEST_API_TOKEN");
+    let endpoint = env::var("CODA_TEST_API_BASE")
+        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let resource = required_env("CODA_TEST_DOC_ID");
+    let configured_table = required_env("CODA_TEST_WIDE_TABLE_ID");
+    let (table_id, table_name) =
+        resolve_table_identity(&endpoint, &credential, &resource, &configured_table)
+            .expect("could not find CODA_TEST_WIDE_TABLE_ID in CODA_TEST_DOC_ID");
+
+    assert_wide_column_formats(&endpoint, &credential, &resource, &table_id)
+        .expect("real Coda wide-table fixture has missing or incorrectly formatted columns");
+    run_duckdb_real_wide_type_case(&resource, &credential, &endpoint, &table_name);
 }
 
 #[derive(Clone, Debug)]
@@ -437,11 +567,10 @@ fn mock_response(
         ("GET", "/docs/mock-doc/tables") => (
             "200 OK",
             json!({
-                "items": [{
-                    "id": "tbl1",
-                    "name": "Tasks",
-                    "tableType": "table"
-                }]
+                "items": [
+                    {"id": "tbl1", "name": "Tasks", "tableType": "table"},
+                    {"id": "tbl_wide", "name": "Wide Types", "tableType": "table"}
+                ]
             })
             .to_string(),
         ),
@@ -456,7 +585,40 @@ fn mock_response(
             })
             .to_string(),
         ),
+        ("GET", "/docs/mock-doc/tables/tbl_wide/columns") => (
+            "200 OK",
+            json!({
+                "items": [
+                    {"id": "c_checkbox", "name": "Checkbox", "calculated": false, "format": {"type": "checkbox", "isArray": false}},
+                    {"id": "c_text", "name": "Text", "calculated": false, "format": {"type": "text", "isArray": false}},
+                    {"id": "c_email", "name": "Email", "calculated": false, "format": {"type": "email", "isArray": false}},
+                    {"id": "c_select", "name": "Select", "calculated": false, "format": {"type": "select", "isArray": false}},
+                    {"id": "c_number", "name": "Number", "calculated": false, "format": {"type": "number", "isArray": false}},
+                    {"id": "c_percent", "name": "Percent", "calculated": false, "format": {"type": "percent", "isArray": false}},
+                    {"id": "c_slider", "name": "Slider", "calculated": false, "format": {"type": "slider", "isArray": false}},
+                    {"id": "c_scale", "name": "Scale", "calculated": false, "format": {"type": "scale", "isArray": false}},
+                    {"id": "c_date", "name": "Date", "calculated": false, "format": {"type": "date", "isArray": false}},
+                    {"id": "c_datetime", "name": "DateTime", "calculated": false, "format": {"type": "dateTime", "isArray": false}},
+                    {"id": "c_time", "name": "Time", "calculated": false, "format": {"type": "time", "isArray": false}},
+                    {"id": "c_duration", "name": "Duration", "calculated": false, "format": {"type": "duration", "isArray": false}},
+                    {"id": "c_currency", "name": "Currency", "calculated": false, "format": {"type": "currency", "isArray": false}},
+                    {"id": "c_image", "name": "Image", "calculated": false, "format": {"type": "image", "isArray": false}},
+                    {"id": "c_person", "name": "Person", "calculated": false, "format": {"type": "person", "isArray": false}},
+                    {"id": "c_hyperlink", "name": "Hyperlink", "calculated": false, "format": {"type": "hyperlink", "isArray": false}},
+                    {"id": "c_lookup", "name": "Lookup", "calculated": false, "format": {"type": "lookup", "isArray": false}},
+                    {"id": "c_other", "name": "Other", "calculated": false, "format": {"type": "canvas", "isArray": false}},
+                    {"id": "c_multiselect", "name": "MultiSelect", "calculated": false, "format": {"type": "select", "isArray": true}},
+                    {"id": "c_durations", "name": "Durations", "calculated": false, "format": {"type": "duration", "isArray": true}},
+                    {"id": "c_currencies", "name": "Currencies", "calculated": false, "format": {"type": "currency", "isArray": true}},
+                    {"id": "c_others", "name": "Others", "calculated": false, "format": {"type": "canvas", "isArray": true}}
+                ]
+            })
+            .to_string(),
+        ),
         ("GET", "/docs/mock-doc/tables/tbl1/rows") => ("200 OK", mock_rows_response(query)),
+        ("GET", "/docs/mock-doc/tables/tbl_wide/rows") => {
+            ("200 OK", mock_wide_rows_response(query))
+        }
         ("POST", "/docs/mock-doc/tables/tbl1/rows")
         | ("PUT", "/docs/mock-doc/tables/tbl1/rows/r1")
         | ("DELETE", "/docs/mock-doc/tables/tbl1/rows") => ("202 Accepted", "{}".to_string()),
@@ -465,6 +627,65 @@ fn mock_response(
             json!({"error": format!("unexpected mock request {method} {path}")}).to_string(),
         ),
     }
+}
+
+fn mock_wide_rows_response(query: &str) -> String {
+    if query.contains("syncToken=") {
+        return json!({"items": []}).to_string();
+    }
+    let precise_number: Value =
+        serde_json::from_str("123456789012345678.12345678901234567890").unwrap();
+    json!({
+        "items": [{
+            "id": "wide-row",
+            "values": {
+                "c_checkbox": true,
+                "c_text": "Alpha",
+                "c_email": "ada@example.com",
+                "c_select": "Open",
+                "c_number": precise_number,
+                "c_percent": 0.125,
+                "c_slider": 42,
+                "c_scale": 5,
+                "c_date": "2024-01-02",
+                "c_datetime": "2024-01-02T03:04:05Z",
+                "c_time": "03:04:05",
+                "c_duration": 0.5,
+                "c_currency": {
+                    "@context": "http://schema.org/", "@type": "MonetaryAmount",
+                    "currency": "USD", "amount": "12.34"
+                },
+                "c_image": {
+                    "@context": "http://schema.org/", "@type": "ImageObject",
+                    "name": "photo.png", "url": "https://example.com/photo.png",
+                    "height": 480, "width": 640, "status": "live"
+                },
+                "c_person": {
+                    "@context": "http://schema.org/", "@type": "Person",
+                    "name": "Ada Lovelace", "email": "ada@example.com"
+                },
+                "c_hyperlink": {
+                    "@context": "http://schema.org/", "@type": "WebPage",
+                    "name": "Example", "url": "https://example.com"
+                },
+                "c_lookup": {
+                    "@context": "http://schema.org/", "@type": "StructuredValue",
+                    "name": "Referenced row", "url": "https://coda.io/row",
+                    "tableId": "tbl-related", "tableUrl": "https://coda.io/table", "rowId": "row-related"
+                },
+                "c_other": {"nested": [1, 2, 3]},
+                "c_multiselect": ["One", "Two"],
+                "c_durations": [0.5, 1],
+                "c_currencies": [
+                    {"@type": "MonetaryAmount", "currency": "USD", "amount": "12.34"},
+                    {"@type": "MonetaryAmount", "currency": "EUR", "amount": "56.78"}
+                ],
+                "c_others": [{"nested": 1}, {"nested": 2}]
+            }
+        }],
+        "nextSyncToken": "wide-sync-token"
+    })
+    .to_string()
 }
 
 fn mock_rows_response(query: &str) -> String {
@@ -708,6 +929,159 @@ fn assert_required_columns(
         }
     }
     Ok(())
+}
+
+fn assert_wide_column_formats(
+    endpoint: &str,
+    credential: &str,
+    resource: &str,
+    table_id: &str,
+) -> Result<(), String> {
+    let columns = paged_items(endpoint, credential, |page_token| {
+        operations::build_list_columns(
+            endpoint,
+            operations::ListColumnsInput {
+                doc_id: resource.to_string(),
+                table_id_or_name: table_id.to_string(),
+                limit: Some(100),
+                page_token,
+                visible_only: Some(false),
+            },
+        )
+    })?;
+    for (name, format_type, expected_array) in [
+        ("Checkbox", "checkbox", false),
+        ("Text", "text", false),
+        ("Email", "email", false),
+        ("Select", "select", false),
+        ("Number", "number", false),
+        ("Percent", "percent", false),
+        ("Slider", "slider", false),
+        ("Scale", "scale", false),
+        ("Date", "date", false),
+        ("DateTime", "dateTime", false),
+        ("Time", "time", false),
+        ("Duration", "duration", false),
+        ("Currency", "currency", false),
+        ("Image", "image", false),
+        ("Person", "person", false),
+        ("Hyperlink", "link", false),
+        ("Lookup", "lookup", false),
+        ("Other", "canvas", false),
+        ("Durations", "duration", true),
+    ] {
+        let actual = columns
+            .iter()
+            .find(|column| column.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|column| column.get("format"))
+            .ok_or_else(|| format!("missing required wide-table column {name}"))?;
+        let actual_type = actual.get("type").and_then(Value::as_str).unwrap_or("");
+        let is_array = actual
+            .get("isArray")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if actual_type != format_type || is_array != expected_array {
+            return Err(format!(
+                "column {name} must have format {format_type} with isArray={expected_array}, got type={actual_type}, isArray={is_array}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_table_identity(
+    endpoint: &str,
+    credential: &str,
+    resource: &str,
+    configured_table: &str,
+) -> Result<(String, String), String> {
+    let tables = paged_items(endpoint, credential, |page_token| {
+        operations::build_list_tables(
+            endpoint,
+            operations::ListTablesInput {
+                doc_id: resource.to_string(),
+                limit: Some(100),
+                page_token,
+                ..Default::default()
+            },
+        )
+    })?;
+    tables
+        .iter()
+        .find(|table| {
+            table.get("id").and_then(Value::as_str) == Some(configured_table)
+                || table.get("name").and_then(Value::as_str) == Some(configured_table)
+        })
+        .and_then(|table| {
+            Some((
+                table.get("id")?.as_str()?.to_string(),
+                table.get("name")?.as_str()?.to_string(),
+            ))
+        })
+        .ok_or_else(|| format!("table {configured_table} was not found"))
+}
+
+fn run_duckdb_real_wide_type_case(
+    resource: &str,
+    credential: &str,
+    endpoint: &str,
+    table_name: &str,
+) {
+    let table = format!("coda_doc.main.{}", sql_ident(table_name));
+    let sql = format!(
+        "LOAD {};\
+         ATTACH {} AS coda_doc (TYPE coda, TOKEN {}, API_BASE {});\
+         SELECT column_name, data_type FROM information_schema.columns \
+         WHERE table_catalog = 'coda_doc' AND table_schema = 'main' AND table_name = {} \
+         ORDER BY ordinal_position;\
+         SELECT count(*) > 0 AS has_populated_wide_row FROM {table} \
+         WHERE \"Checkbox\" IS NOT NULL AND \"Text\" IS NOT NULL AND \"Email\" IS NOT NULL \
+           AND \"Select\" IS NOT NULL AND \"Number\" IS NOT NULL AND \"Percent\" IS NOT NULL \
+           AND \"Slider\" IS NOT NULL AND \"Scale\" IS NOT NULL AND \"Date\" IS NOT NULL \
+           AND \"DateTime\" IS NOT NULL AND \"Time\" IS NOT NULL AND \"Duration\" IS NOT NULL \
+           AND \"Currency\".currency IS NOT NULL AND \"Currency\".amount IS NOT NULL \
+           AND \"Image\".name IS NOT NULL AND \"Image\".url IS NOT NULL \
+           AND \"Image\".height IS NOT NULL AND \"Image\".width IS NOT NULL AND \"Image\".status IS NOT NULL \
+           AND \"Person\".name IS NOT NULL AND \"Person\".email IS NOT NULL \
+           AND \"Hyperlink\".name IS NOT NULL AND \"Hyperlink\".url IS NOT NULL \
+           AND \"Lookup\".name IS NOT NULL AND \"Lookup\".url IS NOT NULL \
+           AND \"Lookup\".tableId IS NOT NULL AND \"Lookup\".tableUrl IS NOT NULL \
+           AND \"Lookup\".rowId IS NOT NULL AND \"Other\" IS NOT NULL \
+           AND len(\"Durations\") > 0 AND \"Durations\"[1] IS NOT NULL;",
+        sql_literal(extension_path()),
+        sql_literal(resource),
+        sql_literal(credential),
+        sql_literal(endpoint),
+        sql_literal(table_name),
+    );
+    let output = run_duckdb(&sql);
+    for expected in [
+        "Checkbox,BOOLEAN",
+        "Text,VARCHAR",
+        "Email,VARCHAR",
+        "Select,VARCHAR",
+        "Number,\"DECIMAL(38,20)\"",
+        "Percent,\"DECIMAL(38,20)\"",
+        "Slider,\"DECIMAL(38,20)\"",
+        "Scale,\"DECIMAL(38,20)\"",
+        "Date,DATE",
+        "DateTime,TIMESTAMP WITH TIME ZONE",
+        "Time,TIME",
+        "Duration,INTERVAL",
+        "Currency,\"STRUCT(currency VARCHAR, amount DECIMAL(38,20))\"",
+        "Image,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)\"",
+        "Person,\"STRUCT(\"\"name\"\" VARCHAR, email VARCHAR)\"",
+        "Hyperlink,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR)\"",
+        "Lookup,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)\"",
+        "Other,JSON",
+        "Durations,INTERVAL[]",
+        "has_populated_wide_row\ntrue",
+    ] {
+        assert!(
+            output.contains(expected),
+            "expected real wide-type output to contain '{expected}', got:\n{output}"
+        );
+    }
 }
 
 fn run_duckdb_success_case(resource: &str, credential: &str, endpoint: &str, table_name: &str) {

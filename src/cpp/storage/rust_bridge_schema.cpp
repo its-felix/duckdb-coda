@@ -16,8 +16,8 @@ static RustBridgeTableInfo BorrowRustBridgeTableInfo(const RustExtCatalogTable &
 	table.columns.reserve(raw_table.column_count);
 	for (idx_t col_idx = 0; col_idx < raw_table.column_count; col_idx++) {
 		auto &raw_column = raw_table.columns[col_idx];
-		table.columns.push_back(
-		    RustBridgeColumnInfo {&raw_column, RustBridgeDuckDBLogicalType(raw_column.logical_type)});
+		table.columns.push_back(RustBridgeColumnInfo {
+		    &raw_column, RustBridgeDuckDBLogicalType(raw_column.logical_type, raw_column.capabilities)});
 	}
 	return table;
 }
