@@ -210,6 +210,7 @@ bool rust_ext_secret_unknown_parameter_message(const char *secret_type_ptr, size
 bool rust_ext_secret_canonical_parameter_name(const char *secret_key_ptr, size_t secret_key_len,
                                               const char *parameter_ptr, size_t parameter_len, RustExtString *out,
                                               RustExtError *err);
+bool rust_ext_validate_secret_token(const char *token_ptr, size_t token_len, RustExtError *err);
 const char *rust_ext_extension_name(void);
 const char *rust_ext_unsupported_update_expression_message(void);
 const char *rust_ext_row_id_column_name(void);

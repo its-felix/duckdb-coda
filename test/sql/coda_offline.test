@@ -13,7 +13,7 @@ ATTACH 'dummy-doc' AS coda_missing_token (TYPE coda);
 Invalid Input Error: failed to resolve Coda attach config: missing credential
 
 statement ok
-CREATE SECRET coda_offline (TYPE coda, TOKEN 'dummy-token');
+CREATE SECRET coda_offline (TYPE coda);
 
 statement error
 ATTACH 'dummy-doc' AS coda_bad_metadata_option (TYPE coda, TOKEN 'dummy-token', INCLUDE_ROW_METADATA 'maybe');

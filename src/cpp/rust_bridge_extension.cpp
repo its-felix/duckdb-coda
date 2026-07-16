@@ -75,12 +75,25 @@ static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretIn
 		scope.emplace_back(config.default_scope);
 	}
 	auto secret = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
+	string credential;
+	bool credential_provided = false;
 	for (auto &named_param : input.options) {
 		auto canonical_name = CanonicalSecretParameterName(config.secret_key, named_param.first);
 		if (!canonical_name.empty()) {
-			secret->secret_map[canonical_name] = named_param.second.ToString();
+			auto value = named_param.second.ToString();
+			secret->secret_map[canonical_name] = value;
+			if (canonical_name == config.secret_key) {
+				credential = std::move(value);
+				credential_provided = true;
+			}
 		} else {
 			throw InvalidInputException("%s", UnknownSecretParameterMessage(input.type, named_param.first));
+		}
+	}
+	if (credential_provided) {
+		RustExtError error;
+		if (!rust_ext_validate_secret_token(credential.c_str(), credential.size(), &error)) {
+			throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 		}
 	}
 	secret->redact_keys = {config.secret_key};

@@ -7,6 +7,7 @@ use crate::ffi::*;
 use crate::json::{free_catalog, free_scan_batch};
 use crate::mutation::{build_equality_query, delete_rows, insert_rows, update_rows};
 use crate::scan::scan_value;
+use crate::sdk::validate_token;
 
 #[no_mangle]
 pub extern "C" fn rust_ext_secret_config_missing_message(
@@ -67,6 +68,17 @@ pub extern "C" fn rust_ext_secret_canonical_parameter_name(
                 RustExtString::default()
             },
         )
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rust_ext_validate_secret_token(
+    token_ptr: *const c_char,
+    token_len: usize,
+    err: *mut RustExtError,
+) -> bool {
+    ffi_bool(err, "failed to validate Coda secret", || {
+        validate_token(str_from_raw(token_ptr, token_len))
     })
 }
 

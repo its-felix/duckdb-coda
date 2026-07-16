@@ -21,6 +21,9 @@ UPDATE coda_doc.main."Tasks" SET "Done" = true WHERE "Task" = 'Ship extension';
 DELETE FROM coda_doc.main."Tasks" WHERE "Task" = 'Ship extension';
 ```
 
+When a token is provided to `CREATE SECRET`, the extension validates it immediately with the Coda `whoami` operation.
+Secret creation succeeds only when that request returns HTTP 200; the response body is ignored.
+
 You can also pass credentials at attach time:
 
 ```sql

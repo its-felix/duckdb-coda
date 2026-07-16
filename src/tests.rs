@@ -5,7 +5,7 @@ use crate::ffi::{
 };
 use crate::json::{column_list_from_json, free_coda_rows_response, free_columns, rows_from_json};
 use crate::mutation::{build_equality_query, insert_body};
-use crate::sdk::send_request;
+use crate::sdk::{send_request, validate_token_at};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{Read, Write};
@@ -89,6 +89,28 @@ fn scan_sort_by_returns_owned_string() {
     assert_ne!(sort_by.ptr, column.id.ptr);
     sort_by.free();
     column.id.free();
+}
+
+#[test]
+fn token_validation_uses_whoami_status() {
+    let server = MockCodaServer::start();
+    validate_token_at(&server.base_url(), "mock-token").unwrap();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/whoami");
+    assert!(
+        requests[0]
+            .headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("Authorization: Bearer mock-token")),
+        "expected bearer token in request headers: {}",
+        requests[0].headers
+    );
+
+    let server = MockCodaServer::start_with_whoami_status("401 Unauthorized");
+    let error = validate_token_at(&server.base_url(), "bad-token").unwrap_err();
+    assert_eq!(error, "Whoami returned HTTP 401, expected 200");
 }
 
 #[test]
@@ -224,6 +246,7 @@ struct MockRequest {
     method: String,
     path: String,
     query: String,
+    headers: String,
     body: String,
 }
 
@@ -236,6 +259,10 @@ struct MockCodaServer {
 
 impl MockCodaServer {
     fn start() -> Self {
+        Self::start_with_whoami_status("200 OK")
+    }
+
+    fn start_with_whoami_status(whoami_status: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind mock Coda server");
         let address = listener
             .local_addr()
@@ -253,7 +280,7 @@ impl MockCodaServer {
                 break;
             }
             match listener.accept() {
-                Ok((stream, _)) => handle_mock_connection(stream, &thread_requests),
+                Ok((stream, _)) => handle_mock_connection(stream, &thread_requests, whoami_status),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -287,7 +314,11 @@ impl Drop for MockCodaServer {
     }
 }
 
-fn handle_mock_connection(mut stream: TcpStream, requests: &Arc<Mutex<Vec<MockRequest>>>) {
+fn handle_mock_connection(
+    mut stream: TcpStream,
+    requests: &Arc<Mutex<Vec<MockRequest>>>,
+    whoami_status: &'static str,
+) {
     let mut buffer = Vec::new();
     let mut temp = [0; 1024];
     let header_end;
@@ -340,10 +371,11 @@ fn handle_mock_connection(mut stream: TcpStream, requests: &Arc<Mutex<Vec<MockRe
         method: method.clone(),
         path: path.clone(),
         query: query.clone(),
+        headers,
         body: body.clone(),
     });
 
-    let (status, response_body) = mock_response(&method, &path, &query);
+    let (status, response_body) = mock_response(&method, &path, &query, whoami_status);
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response_body.len(),
@@ -358,8 +390,14 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn mock_response(method: &str, path: &str, query: &str) -> (&'static str, String) {
+fn mock_response(
+    method: &str,
+    path: &str,
+    query: &str,
+    whoami_status: &'static str,
+) -> (&'static str, String) {
     match (method, path) {
+        ("GET", "/whoami") => (whoami_status, "not valid JSON".to_string()),
         ("GET", "/docs/mock-doc/tables") => (
             "200 OK",
             json!({
