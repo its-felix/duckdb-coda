@@ -13,7 +13,7 @@ static vector<RustExtWriteColumn> EditableColumns(const RustBridgeTableInfo &tab
 	for (auto &column : table.columns) {
 		auto &raw_column = column.Raw();
 		RustExtWriteColumn rust_bridge_column {};
-		rust_bridge_column.id = raw_column.id;
+		rust_bridge_column.handle = raw_column.handle;
 		rust_bridge_column.capabilities = raw_column.capabilities;
 		result.push_back(rust_bridge_column);
 	}
@@ -23,23 +23,22 @@ static vector<RustExtWriteColumn> EditableColumns(const RustBridgeTableInfo &tab
 RustBridgeClient::RustBridgeClient(RustExtClientConfig config_p) : config(config_p) {
 }
 
-RustBridgeCatalogResponse RustBridgeClient::ListTables(bool include_system_columns) {
+RustBridgeCatalogResponse RustBridgeClient::ListTables() {
 	RustExtCatalog catalog {};
 	RustExtError error;
-	auto request_config = config;
-	request_config.include_system_columns = include_system_columns;
-	if (!rust_ext_client_load_catalog(request_config, &catalog, &error)) {
+	if (!rust_ext_client_load_catalog(config, &catalog, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
 	return RustBridgeCatalogResponse(catalog);
 }
 
-RustBridgeScanHandle RustBridgeClient::OpenScan(RustExtString table_id, const RustBridgeScanRequest &request) {
+RustBridgeScanHandle RustBridgeClient::OpenScan(const RustBridgeTableInfo &table,
+                                                const RustBridgeScanRequest &request) {
 	void *handle = nullptr;
 	RustExtError error;
 	RustExtScanRequest rust_bridge_request {BorrowRustBridgeString(request.filter),
 	                                        BorrowRustBridgeString(request.order), request.limit};
-	if (!rust_ext_scan_open(config, table_id, rust_bridge_request, &handle, &error)) {
+	if (!rust_ext_scan_open(config, table.Raw().handle, rust_bridge_request, &handle, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
 	return RustBridgeScanHandle(handle);
@@ -68,9 +67,8 @@ idx_t RustBridgeClient::InsertRows(const RustBridgeTableInfo &table, DataChunk &
 
 	RustExtError error;
 	size_t affected_count = 0;
-	if (!rust_ext_client_insert_rows(config, table.Raw().id, columns.data(), columns.size(), values.data(),
-	                                 chunk.size(), table.columns.size(), table.Raw().capabilities, &affected_count,
-	                                 &error)) {
+	if (!rust_ext_client_insert_rows(config, table.Raw().handle, columns.data(), columns.size(), values.data(),
+	                                 chunk.size(), table.columns.size(), &affected_count, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
 	return affected_count;
@@ -94,7 +92,7 @@ idx_t RustBridgeClient::UpdateRows(const RustBridgeTableInfo &table, DataChunk &
 			column.capabilities = RUST_EXT_COLUMN_GENERATED;
 		} else {
 			auto &raw_column = table.columns[col_idx].Raw();
-			column.id = raw_column.id;
+			column.handle = raw_column.handle;
 			column.capabilities = raw_column.capabilities;
 		}
 		update_columns.push_back(column);
@@ -129,9 +127,9 @@ idx_t RustBridgeClient::UpdateRows(const RustBridgeTableInfo &table, DataChunk &
 
 	RustExtError error;
 	size_t affected_count = 0;
-	if (!rust_ext_client_update_rows(config, table.Raw().id, rust_bridge_row_ids.data(), rust_bridge_row_ids.size(),
-	                                 update_columns.data(), update_columns.size(), values.data(),
-	                                 table.Raw().capabilities, &affected_count, &error)) {
+	if (!rust_ext_client_update_rows(config, table.Raw().handle, rust_bridge_row_ids.data(), rust_bridge_row_ids.size(),
+	                                 update_columns.data(), update_columns.size(), values.data(), &affected_count,
+	                                 &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
 	return affected_count;
@@ -149,7 +147,7 @@ idx_t RustBridgeClient::DeleteRows(const RustBridgeTableInfo &table, DataChunk &
 
 	RustExtError error;
 	size_t affected_count = 0;
-	if (!rust_ext_client_delete_rows(config, table.Raw().id, rust_bridge_row_ids.data(), rust_bridge_row_ids.size(),
+	if (!rust_ext_client_delete_rows(config, table.Raw().handle, rust_bridge_row_ids.data(), rust_bridge_row_ids.size(),
 	                                 &affected_count, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}

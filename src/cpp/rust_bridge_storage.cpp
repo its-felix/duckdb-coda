@@ -52,8 +52,12 @@ static bool HostLookupSecret(void *userdata, RustExtString scope, const char *se
 		}
 
 		auto &kv = dynamic_cast<const KeyValueSecret &>(*match.secret_entry->secret);
-		auto value = kv.TryGetValue(secret_key, true).ToString();
-		AllocateHostString(value, out);
+		auto secret_value = kv.TryGetValue(secret_key);
+		if (secret_value.IsNull()) {
+			*out = RustExtString {};
+			return true;
+		}
+		AllocateHostString(secret_value.ToString(), out);
 		return true;
 	} catch (std::exception &ex) {
 		SetRustBridgeErrorMessage(err, ex.what());

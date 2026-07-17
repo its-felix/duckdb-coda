@@ -7,7 +7,7 @@ use superhuman_docs::{
     Client, ClientOptions, Error, Request, Response, Transport, DEFAULT_BASE_URL,
 };
 
-use crate::ffi::RustExtClientConfig;
+use crate::model::SuperhumanDocsClientConfig;
 
 pub(crate) fn normalize_api_base(base: &str) -> String {
     base.trim_end_matches('/').to_string()
@@ -102,13 +102,13 @@ pub(crate) struct SdkClient {
 }
 
 impl SdkClient {
-    pub(crate) fn new(config: RustExtClientConfig) -> Result<Self, String> {
-        let base_url = if config.endpoint.as_str().is_empty() {
+    pub(crate) fn new(config: &SuperhumanDocsClientConfig) -> Result<Self, String> {
+        let base_url = if config.endpoint.is_empty() {
             DEFAULT_BASE_URL
         } else {
             config.endpoint.as_str()
         };
-        Self::at(base_url, config.credential.as_str())
+        Self::at(base_url, &config.credential)
     }
 
     pub(crate) fn at(base_url: &str, _credential: &str) -> Result<Self, String> {
@@ -134,7 +134,8 @@ impl SdkClient {
         &self,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
     ) -> Result<String, String> {
-        self.execute_inner(None, operation)
+        self.execute_inner(None, None, operation)?
+            .ok_or_else(|| "SDK transport returned an unexpected accepted status".to_string())
     }
 
     pub(crate) fn execute_with_body<T>(
@@ -142,14 +143,24 @@ impl SdkClient {
         body: String,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
     ) -> Result<String, String> {
-        self.execute_inner(Some(body.into_bytes()), operation)
+        self.execute_inner(Some(body.into_bytes()), None, operation)?
+            .ok_or_else(|| "SDK transport returned an unexpected accepted status".to_string())
+    }
+
+    pub(crate) fn execute_accepting_status<T>(
+        &self,
+        accepted_status: u16,
+        operation: impl FnOnce(&Client) -> Result<T, Error>,
+    ) -> Result<Option<String>, String> {
+        self.execute_inner(None, Some(accepted_status), operation)
     }
 
     fn execute_inner<T>(
         &self,
         body_override: Option<Vec<u8>>,
+        accepted_status: Option<u16>,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
-    ) -> Result<String, String> {
+    ) -> Result<Option<String>, String> {
         let _execution = self
             .execution
             .lock()
@@ -174,11 +185,16 @@ impl SdkClient {
         };
 
         match (result, exchange) {
-            (Ok(_), Some(exchange)) => response_body(exchange.response),
+            (Ok(_), Some(exchange)) => response_body(exchange.response).map(Some),
             (Err(Error::Deserialize { .. }), Some(exchange))
                 if exchange.response.status == exchange.expected_status =>
             {
-                response_body(exchange.response)
+                response_body(exchange.response).map(Some)
+            }
+            (Err(Error::UnexpectedStatus { actual, .. }), Some(_))
+                if accepted_status == Some(actual) =>
+            {
+                Ok(None)
             }
             (Err(error), _) => Err(error.to_string()),
             (Ok(_), None) => Err("SDK transport returned no response".to_string()),

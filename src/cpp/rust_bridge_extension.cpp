@@ -6,115 +6,57 @@
 #include "duckdb/storage/storage_extension.hpp"
 #include "rust_bridge_string.hpp"
 #include "rust_bridge_storage.hpp"
+#include "rust_bridge_value.hpp"
 
 #include <exception>
-#include <mutex>
-#include <unordered_map>
-
 namespace duckdb {
 
-struct RustBridgeSecretConfig {
-	string provider;
-	string extension;
-	string default_scope;
-	string secret_key;
-	string secret_env_key;
+class RustBridgeSecretResult {
+public:
+	~RustBridgeSecretResult() {
+		rust_ext_free_secret(value);
+	}
+	RustExtSecretCreateResult value {};
 };
 
-static mutex &SecretConfigLock() {
-	static mutex lock;
-	return lock;
-}
-
-static unordered_map<string, RustBridgeSecretConfig> &SecretConfigs() {
-	static unordered_map<string, RustBridgeSecretConfig> configs;
-	return configs;
-}
-
-static string SecretConfigMissingMessage(const string &secret_type) {
-	RustExtString message;
-	RustExtError error;
-	if (!rust_ext_secret_config_missing_message(secret_type.c_str(), secret_type.size(), &message, &error)) {
-		return TakeRustBridgeErrorMessage(error);
+static unique_ptr<BaseSecret> CreateRustBridgeSecret(ClientContext &, CreateSecretInput &input) {
+	vector<RustExtString> scope;
+	scope.reserve(input.scope.size());
+	for (auto &entry : input.scope) {
+		scope.push_back(BorrowRustBridgeString(entry));
 	}
-	return TakeRustBridgeString(message);
-}
-
-static string UnknownSecretParameterMessage(const string &secret_type, const string &parameter_name) {
-	RustExtString message;
-	RustExtError error;
-	if (!rust_ext_secret_unknown_parameter_message(secret_type.c_str(), secret_type.size(), parameter_name.c_str(),
-	                                               parameter_name.size(), &message, &error)) {
-		return TakeRustBridgeErrorMessage(error);
+	RustBridgeInputValueBuffer value_buffer;
+	value_buffer.Reserve(input.options.size());
+	vector<RustExtNamedValue> options;
+	options.reserve(input.options.size());
+	for (auto &entry : input.options) {
+		options.push_back(RustExtNamedValue {BorrowRustBridgeString(entry.first), value_buffer.Convert(entry.second)});
 	}
-	return TakeRustBridgeString(message);
-}
-
-static string CanonicalSecretParameterName(const string &secret_key, const string &parameter_name) {
-	RustExtString canonical;
+	RustExtSecretCreateInput rust_input {BorrowRustBridgeString(input.type),
+	                                     BorrowRustBridgeString(input.provider),
+	                                     BorrowRustBridgeString(input.name),
+	                                     scope.data(),
+	                                     scope.size(),
+	                                     options.data(),
+	                                     options.size()};
+	RustBridgeSecretResult result;
 	RustExtError error;
-	if (!rust_ext_secret_canonical_parameter_name(secret_key.c_str(), secret_key.size(), parameter_name.c_str(),
-	                                              parameter_name.size(), &canonical, &error)) {
+	if (!rust_ext_create_secret(rust_input, &result.value, &error)) {
 		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
 	}
-	return TakeRustBridgeString(canonical);
-}
-
-static string ReadEnvironmentVariable(const string &name) {
-	RustExtString value;
-	RustExtError error;
-	if (!rust_ext_read_environment_variable(name.c_str(), name.size(), &value, &error)) {
-		throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
+	vector<string> resolved_scope;
+	resolved_scope.reserve(result.value.scope_count);
+	for (idx_t idx = 0; idx < result.value.scope_count; idx++) {
+		resolved_scope.push_back(RustBridgeString(result.value.scope[idx]));
 	}
-	return TakeRustBridgeString(value);
-}
-
-static unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretInput &input) {
-	RustBridgeSecretConfig config;
-	{
-		lock_guard<mutex> lock(SecretConfigLock());
-		auto entry = SecretConfigs().find(input.type);
-		if (entry == SecretConfigs().end()) {
-			throw InvalidInputException("%s", SecretConfigMissingMessage(input.type));
-		}
-		config = entry->second;
+	auto secret = make_uniq<KeyValueSecret>(resolved_scope, input.type, input.provider, input.name);
+	for (idx_t idx = 0; idx < result.value.entry_count; idx++) {
+		auto &entry = result.value.entries[idx];
+		secret->secret_map[RustBridgeString(entry.name)] = RustBridgeDuckDBValue(entry.value);
 	}
-
-	auto scope = input.scope;
-	if (scope.empty()) {
-		scope.emplace_back(config.default_scope);
+	for (idx_t idx = 0; idx < result.value.redact_key_count; idx++) {
+		secret->redact_keys.insert(RustBridgeString(result.value.redact_keys[idx]));
 	}
-	auto secret = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
-	string credential;
-	bool credential_provided = false;
-	for (auto &named_param : input.options) {
-		auto canonical_name = CanonicalSecretParameterName(config.secret_key, named_param.first);
-		if (!canonical_name.empty()) {
-			if (credential_provided) {
-				throw InvalidInputException("TOKEN and TOKEN_ENV cannot both be specified");
-			}
-			credential = named_param.second.ToString();
-			credential_provided = true;
-			continue;
-		}
-		canonical_name = CanonicalSecretParameterName(config.secret_env_key, named_param.first);
-		if (canonical_name.empty()) {
-			throw InvalidInputException("%s", UnknownSecretParameterMessage(input.type, named_param.first));
-		}
-		if (credential_provided) {
-			throw InvalidInputException("TOKEN and TOKEN_ENV cannot both be specified");
-		}
-		credential = ReadEnvironmentVariable(named_param.second.ToString());
-		credential_provided = true;
-	}
-	if (credential_provided) {
-		secret->secret_map[config.secret_key] = credential;
-		RustExtError error;
-		if (!rust_ext_validate_secret_token(credential.c_str(), credential.size(), &error)) {
-			throw InvalidInputException("%s", TakeRustBridgeErrorMessage(error));
-		}
-	}
-	secret->redact_keys = {config.secret_key};
 	return std::move(secret);
 }
 
@@ -129,27 +71,25 @@ static bool HostSetDescription(void *loader_ptr, const char *description, RustEx
 	}
 }
 
-static bool HostRegisterConfigSecret(void *loader_ptr, const char *secret_type, const char *provider,
-                                     const char *extension, const char *default_scope, const char *secret_key,
-                                     const char *secret_env_key, RustExtError *err) {
+static bool HostRegisterSecret(void *loader_ptr, RustExtSecretRegistration registration, RustExtError *err) {
 	try {
 		auto &loader = *reinterpret_cast<ExtensionLoader *>(loader_ptr);
-		{
-			lock_guard<mutex> lock(SecretConfigLock());
-			SecretConfigs()[secret_type] =
-			    RustBridgeSecretConfig {provider, extension, default_scope, secret_key, secret_env_key};
-		}
+		auto secret_type = RustBridgeString(registration.secret_type);
+		auto provider = RustBridgeString(registration.provider);
 
 		SecretType type;
 		type.name = secret_type;
 		type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 		type.default_provider = provider;
-		type.extension = extension;
+		type.extension = RustBridgeString(registration.extension);
 		loader.RegisterSecretType(type);
 
-		CreateSecretFunction config_fun = {secret_type, provider, CreateConfigSecret};
-		config_fun.named_parameters[secret_key] = LogicalType::VARCHAR;
-		config_fun.named_parameters[secret_env_key] = LogicalType::VARCHAR;
+		CreateSecretFunction config_fun = {secret_type, provider, CreateRustBridgeSecret};
+		for (idx_t idx = 0; idx < registration.parameter_count; idx++) {
+			auto &parameter = registration.parameters[idx];
+			config_fun.named_parameters[RustBridgeString(parameter.name)] =
+			    UnboundType::TryParseAndDefaultBind(RustBridgeString(parameter.logical_type));
+		}
 		loader.RegisterFunction(config_fun);
 		return true;
 	} catch (std::exception &ex) {
@@ -173,7 +113,7 @@ static bool HostRegisterStorageExtension(void *loader_ptr, const char *extension
 static void LoadFromRustBridge(ExtensionLoader &loader) {
 	RustExtDuckDbHost host {
 	    HostSetDescription,
-	    HostRegisterConfigSecret,
+	    HostRegisterSecret,
 	    HostRegisterStorageExtension,
 	};
 	RustExtError error;

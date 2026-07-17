@@ -1,10 +1,22 @@
 use crate::ffi::*;
+use crate::model::{SuperhumanDocsColumn, SuperhumanDocsRow};
 use serde_json::{Map, Value};
+
+fn unfence_rich_text(value: &str) -> &str {
+    let Some(inner) = value
+        .strip_prefix("```")
+        .and_then(|inner| inner.strip_suffix("```"))
+    else {
+        return value;
+    };
+    let inner = inner.strip_prefix('\n').unwrap_or(inner);
+    inner.strip_suffix('\n').unwrap_or(inner)
+}
 
 fn scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::String(inner) => Some(inner.clone()),
+        Value::String(inner) => Some(unfence_rich_text(inner).to_string()),
         Value::Bool(_) | Value::Number(_) => Some(value.to_string()),
         Value::Object(inner) => inner
             .get("name")
@@ -26,19 +38,32 @@ fn projected_object(value: &Value, fields: &[&str]) -> Option<String> {
     Some(Value::Object(projected).to_string())
 }
 
-fn normalized_value(logical_type: i32, value: &Value) -> Option<(String, bool)> {
-    let text = match logical_type {
-        RUST_EXT_LOGICAL_JSON => value.to_string(),
-        RUST_EXT_LOGICAL_CURRENCY => projected_object(value, &["currency", "amount"])?,
-        RUST_EXT_LOGICAL_IMAGE => {
-            projected_object(value, &["name", "url", "height", "width", "status"])?
-        }
-        RUST_EXT_LOGICAL_PERSON => projected_object(value, &["name", "email"])?,
-        RUST_EXT_LOGICAL_HYPERLINK => projected_object(value, &["name", "url"])?,
-        RUST_EXT_LOGICAL_LOOKUP => {
-            projected_object(value, &["name", "url", "tableId", "tableUrl", "rowId"])?
-        }
-        RUST_EXT_LOGICAL_INTERVAL => {
+fn normalized_percent(value: &Value) -> Option<String> {
+    let scalar = scalar_text(value)?;
+    if scalar.parse::<f64>().is_ok() {
+        return Some(scalar);
+    }
+    if !scalar.contains('%') {
+        return None;
+    }
+    let percentage = scalar
+        .chars()
+        .filter(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | ','))
+        .collect::<String>()
+        .replace(',', ".");
+    let percentage = percentage.parse::<f64>().ok()?;
+    Some((percentage / 100.0).to_string())
+}
+
+fn normalized_value(format_type: &str, value: &Value) -> Option<String> {
+    let normalized_type = format_type.to_ascii_lowercase();
+    let text = match normalized_type.as_str() {
+        "currency" => projected_object(value, &["currency", "amount"])?,
+        "image" => projected_object(value, &["name", "url", "height", "width", "status"])?,
+        "person" => projected_object(value, &["name", "email"])?,
+        "link" | "hyperlink" => projected_object(value, &["name", "url"])?,
+        "lookup" => projected_object(value, &["name", "url", "tableId", "tableUrl", "rowId"])?,
+        "duration" => {
             let scalar = scalar_text(value)?;
             if scalar.parse::<f64>().is_ok() {
                 format!("{scalar} days")
@@ -46,50 +71,45 @@ fn normalized_value(logical_type: i32, value: &Value) -> Option<(String, bool)> 
                 scalar
             }
         }
-        _ => scalar_text(value)?,
+        "percent" => normalized_percent(value)?,
+        "checkbox" | "text" | "email" | "select" | "number" | "slider" | "scale" | "date"
+        | "datetime" | "time" => scalar_text(value)?,
+        _ => value.to_string(),
     };
-    let bool_value = logical_type == RUST_EXT_LOGICAL_BOOLEAN
-        && (value.as_bool() == Some(true) || text.eq_ignore_ascii_case("true"));
-    Some((text, bool_value))
+    Some(text)
 }
 
-pub(crate) fn scan_value(column: RustExtColumn, row: RustExtRow) -> RustExtScanValue {
+pub(crate) fn scan_value(
+    column: &SuperhumanDocsColumn,
+    row: &SuperhumanDocsRow,
+) -> RustExtScanValue {
     let column_id = column.id.as_str();
     if column.capabilities & RUST_EXT_COLUMN_SYSTEM != 0 {
         let value = if column_id.eq_ignore_ascii_case("createdAt") {
-            row.created_at
+            row.created_at.as_str()
         } else if column_id.eq_ignore_ascii_case("updatedAt") {
-            row.updated_at
+            row.updated_at.as_str()
         } else {
-            RustExtString::default()
+            ""
         };
-        if value.as_str().is_empty() {
+        if value.is_empty() {
             return RustExtScanValue::default();
         }
         return RustExtScanValue {
             is_null: false,
-            value_type: 3,
-            value,
+            value: borrow_string(value),
             ..Default::default()
         };
     }
-    if row.cells.is_null() {
-        return RustExtScanValue::default();
-    }
-    let cells = slice_from_raw_parts(row.cells, row.cell_count);
-    for cell in cells {
-        if !cell.column_id.as_str().eq_ignore_ascii_case(column_id) {
+    for cell in &row.cells {
+        if !cell.column_id.eq_ignore_ascii_case(column_id) {
             continue;
         }
-        if cell.value_type == 0 || cell.value_type == 1 {
+        if cell.value.is_null() {
             return RustExtScanValue::default();
         }
-        let parsed: Value = match serde_json::from_str(cell.value.as_str()) {
-            Ok(value) => value,
-            Err(_) => return RustExtScanValue::default(),
-        };
-        if column.capabilities & RUST_EXT_COLUMN_ARRAY != 0 {
-            let values = match parsed.as_array() {
+        if column.is_array {
+            let values = match cell.value.as_array() {
                 Some(values) => values,
                 None => return RustExtScanValue::default(),
             };
@@ -102,7 +122,7 @@ pub(crate) fn scan_value(column: RustExtColumn, row: RustExtRow) -> RustExtScanV
                     });
                     continue;
                 }
-                let (value_text, _) = match normalized_value(column.logical_type, value) {
+                let value_text = match normalized_value(&column.format_type, value) {
                     Some(value) => value,
                     None => {
                         array_values.push(RustExtArrayValue {
@@ -120,20 +140,17 @@ pub(crate) fn scan_value(column: RustExtColumn, row: RustExtRow) -> RustExtScanV
             let (array_values, array_count) = vec_into_raw_parts(array_values);
             return RustExtScanValue {
                 is_null: false,
-                value_type: cell.value_type,
                 array_values,
                 array_count,
                 ..Default::default()
             };
         }
-        let (value_text, bool_value) = match normalized_value(column.logical_type, &parsed) {
+        let value_text = match normalized_value(&column.format_type, &cell.value) {
             Some(value) => value,
             None => return RustExtScanValue::default(),
         };
         return RustExtScanValue {
             is_null: false,
-            value_type: cell.value_type,
-            bool_value,
             value_owned: true,
             value: alloc_string(&value_text),
             ..Default::default()

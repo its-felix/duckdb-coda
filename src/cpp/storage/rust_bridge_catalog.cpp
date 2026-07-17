@@ -38,7 +38,7 @@ RustBridgeCatalog::~RustBridgeCatalog() {
 
 void RustBridgeCatalog::LoadCatalog(ClientContext &context) {
 	auto client = Client();
-	catalog_info = client.ListTables(attach_config.IncludeSystemColumns());
+	catalog_info = client.ListTables();
 
 	CreateSchemaInfo schema_info;
 	schema_info.catalog = INVALID_CATALOG;
@@ -143,7 +143,7 @@ bool RustBridgeCatalog::InMemory() {
 }
 
 string RustBridgeCatalog::GetDBPath() {
-	return RustBridgeString(attach_config.Raw().resource);
+	return RustBridgeString(attach_config.DatabaseName());
 }
 
 } // namespace duckdb

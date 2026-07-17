@@ -10,14 +10,29 @@
 
 namespace duckdb {
 
+static LogicalType ApplyValueTypeAlias(LogicalType type, const string &alias) {
+	if (alias.empty()) {
+		return type;
+	}
+	if (type.id() == LogicalTypeId::LIST) {
+		return LogicalType::LIST(ApplyValueTypeAlias(ListType::GetChildType(type), alias));
+	}
+	if (type.id() == LogicalTypeId::ARRAY) {
+		return LogicalType::ARRAY(ApplyValueTypeAlias(ArrayType::GetChildType(type), alias), ArrayType::GetSize(type));
+	}
+	type.SetAlias(alias);
+	return type;
+}
+
 static RustBridgeTableInfo BorrowRustBridgeTableInfo(const RustExtCatalogTable &raw_table) {
 	RustBridgeTableInfo table;
 	table.table = &raw_table;
 	table.columns.reserve(raw_table.column_count);
 	for (idx_t col_idx = 0; col_idx < raw_table.column_count; col_idx++) {
 		auto &raw_column = raw_table.columns[col_idx];
+		auto type = UnboundType::TryParseAndDefaultBind(RustBridgeString(raw_column.logical_type));
 		table.columns.push_back(RustBridgeColumnInfo {
-		    &raw_column, RustBridgeDuckDBLogicalType(raw_column.logical_type, raw_column.capabilities)});
+		    &raw_column, ApplyValueTypeAlias(std::move(type), RustBridgeString(raw_column.value_type_alias))});
 	}
 	return table;
 }

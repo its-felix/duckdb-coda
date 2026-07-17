@@ -1,0 +1,61 @@
+# name: test/sql/superhuman_docs_offline.test
+# description: Offline sanity checks for the Superhuman Docs extension
+# group: [sql]
+
+require superhuman_docs
+
+statement ok
+LOAD superhuman_docs;
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_missing_token (TYPE superhuman_docs);
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: missing credential
+
+statement ok
+CREATE SECRET superhuman_docs_offline (TYPE superhuman_docs);
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_empty_secret (TYPE superhuman_docs);
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: missing credential
+
+statement error
+CREATE SECRET superhuman_docs_missing_token_env (TYPE superhuman_docs, TOKEN_ENV 'DUCKDB_SUPERHUMAN_DOCS_ENV_DOES_NOT_EXIST');
+----
+Invalid Input Error: failed to create extension secret: failed to read environment variable DUCKDB_SUPERHUMAN_DOCS_ENV_DOES_NOT_EXIST: environment variable not found
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_missing_token_env (TYPE superhuman_docs, TOKEN_ENV 'DUCKDB_SUPERHUMAN_DOCS_ENV_DOES_NOT_EXIST');
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: failed to read environment variable DUCKDB_SUPERHUMAN_DOCS_ENV_DOES_NOT_EXIST: environment variable not found
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_bad_metadata_option (TYPE superhuman_docs, TOKEN 'dummy-token', INCLUDE_ROW_METADATA 'maybe');
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: invalid boolean value for INCLUDE_ROW_METADATA: maybe
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_bad_wait_option (TYPE superhuman_docs, TOKEN 'dummy-token', WAIT_FOR_MUTATIONS 'maybe');
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: invalid boolean value for WAIT_FOR_MUTATIONS: maybe
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_timeout_without_wait (TYPE superhuman_docs, TOKEN 'dummy-token', MUTATION_TIMEOUT_SECONDS 5);
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: MUTATION_TIMEOUT_SECONDS requires WAIT_FOR_MUTATIONS true
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_warnings_without_wait (TYPE superhuman_docs, TOKEN 'dummy-token', ALLOW_MUTATION_WARNINGS true);
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: ALLOW_MUTATION_WARNINGS requires WAIT_FOR_MUTATIONS true
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_zero_timeout (TYPE superhuman_docs, TOKEN 'dummy-token', WAIT_FOR_MUTATIONS true, MUTATION_TIMEOUT_SECONDS 0);
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: MUTATION_TIMEOUT_SECONDS must be a positive integer
+
+statement error
+ATTACH 'dummy-doc' AS superhuman_docs_bad_warning_option (TYPE superhuman_docs, TOKEN 'dummy-token', WAIT_FOR_MUTATIONS true, ALLOW_MUTATION_WARNINGS 'maybe');
+----
+Invalid Input Error: failed to resolve Superhuman Docs attach config: invalid boolean value for ALLOW_MUTATION_WARNINGS: maybe

@@ -1,12 +1,20 @@
-use crate::attach::read_environment_variable;
-use crate::ffi::*;
-use crate::json::{
-    column_list_from_json, free_coda_rows_response, free_columns, logical_type, rows_from_json,
+use crate::attach::{
+    doc_id_from_browser_url, doc_id_from_resolved_link, is_browser_url, read_environment_variable,
+    resolve_attach, strip_attach_resource_prefix,
 };
-use crate::mutation::{build_equality_query, insert_body};
+use crate::ffi::*;
+use crate::json::{column_list_from_json, logical_type, logical_type_alias, rows_from_json};
+use crate::model::{
+    SuperhumanDocsCell, SuperhumanDocsClientConfig, SuperhumanDocsColumn, SuperhumanDocsRow,
+};
+use crate::mutation::{build_equality_query, insert_body, update_body};
+use crate::scan::scan_value;
 use crate::sdk::{validate_token_at, SdkClient};
+use crate::secret::{create_secret, free_secret};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
+use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -17,75 +25,113 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use superhuman_docs::{operations, Client, Error, DEFAULT_BASE_URL};
 
+static NETWORK_UNIT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn parse_columns_and_rows() {
     let columns = column_list_from_json(
         r#"{"items":[{"id":"c-id","name":"Amount","calculated":true,"format":{"type":"currency","isArray":false}}],"nextPageToken":"next"}"#,
     )
     .unwrap();
-    assert_eq!(columns.count, 1);
-    let column_items = slice_from_raw_parts(columns.items, columns.count);
-    assert_eq!(column_items[0].id.as_str(), "c-id");
-    assert_eq!(column_items[0].logical_type, RUST_EXT_LOGICAL_CURRENCY);
-    free_columns(columns);
+    assert_eq!(columns.items.len(), 1);
+    assert_eq!(columns.items[0].id, "c-id");
+    assert_eq!(
+        columns.items[0].duckdb_type,
+        "STRUCT(currency VARCHAR, amount DECIMAL(38,20))"
+    );
 
     let rows = rows_from_json(
         r#"{"items":[{"id":"r1","createdAt":"2024-01-01T00:00:00Z","values":{"c1":true,"c2":[1,2],"c3":"plain"}}],"nextSyncToken":"sync"}"#,
     )
     .unwrap();
-    assert_eq!(rows.row_count, 1);
-    let row_items = slice_from_raw_parts(rows.rows, rows.row_count);
-    assert_eq!(row_items[0].cell_count, 3);
-    assert_eq!(rows.next_sync_token.as_str(), "sync");
-    free_coda_rows_response(rows);
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].cells.len(), 3);
+    assert_eq!(rows.next_sync_token, "sync");
 }
 
 #[test]
 fn documented_column_formats_map_to_duckdb_logical_types() {
     for (format_type, expected) in [
-        ("checkbox", RUST_EXT_LOGICAL_BOOLEAN),
-        ("text", RUST_EXT_LOGICAL_VARCHAR),
-        ("email", RUST_EXT_LOGICAL_VARCHAR),
-        ("select", RUST_EXT_LOGICAL_VARCHAR),
-        ("number", RUST_EXT_LOGICAL_DECIMAL),
-        ("percent", RUST_EXT_LOGICAL_DECIMAL),
-        ("slider", RUST_EXT_LOGICAL_DECIMAL),
-        ("scale", RUST_EXT_LOGICAL_DECIMAL),
-        ("date", RUST_EXT_LOGICAL_DATE),
-        ("dateTime", RUST_EXT_LOGICAL_TIMESTAMP_TZ),
-        ("time", RUST_EXT_LOGICAL_TIME),
-        ("duration", RUST_EXT_LOGICAL_INTERVAL),
-        ("currency", RUST_EXT_LOGICAL_CURRENCY),
-        ("image", RUST_EXT_LOGICAL_IMAGE),
-        ("person", RUST_EXT_LOGICAL_PERSON),
-        ("link", RUST_EXT_LOGICAL_HYPERLINK),
-        ("hyperlink", RUST_EXT_LOGICAL_HYPERLINK),
-        ("lookup", RUST_EXT_LOGICAL_LOOKUP),
-        ("canvas", RUST_EXT_LOGICAL_JSON),
+        ("checkbox", "BOOLEAN"),
+        ("text", "VARCHAR"),
+        ("email", "VARCHAR"),
+        ("select", "VARCHAR"),
+        ("number", "DECIMAL(38,20)"),
+        ("percent", "DECIMAL(38,20)"),
+        ("slider", "DECIMAL(38,20)"),
+        ("scale", "DECIMAL(38,20)"),
+        ("date", "DATE"),
+        ("dateTime", "TIMESTAMPTZ"),
+        ("time", "TIME"),
+        ("duration", "INTERVAL"),
+        (
+            "currency",
+            "STRUCT(currency VARCHAR, amount DECIMAL(38,20))",
+        ),
+        (
+            "image",
+            "STRUCT(name VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)",
+        ),
+        ("person", "STRUCT(name VARCHAR, email VARCHAR)"),
+        ("link", "STRUCT(name VARCHAR, url VARCHAR)"),
+        ("hyperlink", "STRUCT(name VARCHAR, url VARCHAR)"),
+        (
+            "lookup",
+            "STRUCT(name VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)",
+        ),
+        ("canvas", "VARCHAR"),
     ] {
         assert_eq!(logical_type(format_type, false), expected, "{format_type}");
     }
-    assert_eq!(logical_type("number", true), RUST_EXT_LOGICAL_DECIMAL);
-    assert_eq!(logical_type("select", true), RUST_EXT_LOGICAL_VARCHAR);
+    assert_eq!(logical_type("number", true), "DECIMAL(38,20)[]");
+    assert_eq!(logical_type("select", true), "VARCHAR[]");
+    assert_eq!(logical_type_alias("canvas"), "JSON");
+    assert_eq!(logical_type_alias("number"), "");
 }
 
 #[test]
 fn mutation_bodies_match_previous_shape() {
-    let columns = [RustExtWriteColumn {
-        id: alloc_string("c1"),
+    let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
+        id: "c1".to_string(),
+        name: "Column".to_string(),
+        format_type: "text".to_string(),
+        duckdb_type: "VARCHAR".to_string(),
+        duckdb_type_alias: String::new(),
+        is_array: false,
         capabilities: RUST_EXT_COLUMN_EDITABLE,
-        ..Default::default()
-    }];
-    let values = [RustExtInputValue {
-        value_type: 5,
-        string_value: alloc_string("v"),
-        ..Default::default()
-    }];
+    }));
+    let columns = [
+        RustExtWriteColumn {
+            handle: column.cast(),
+            capabilities: RUST_EXT_COLUMN_EDITABLE,
+            ..Default::default()
+        },
+        RustExtWriteColumn {
+            handle: column.cast(),
+            capabilities: RUST_EXT_COLUMN_EDITABLE,
+            ..Default::default()
+        },
+    ];
+    let values = [
+        RustExtInputValue {
+            value_type: 5,
+            string_value: alloc_string("v"),
+            ..Default::default()
+        },
+        RustExtInputValue {
+            value_type: RUST_EXT_INPUT_NULL,
+            ..Default::default()
+        },
+    ];
     assert_eq!(
-        insert_body(&columns, &values, 1, 1, RUST_EXT_TABLE_INSERT).unwrap(),
+        insert_body(&columns, &values, 1, 2, RUST_EXT_TABLE_INSERT).unwrap(),
         r#"{"rows":[{"cells":[{"column":"c1","value":"v"}]}]}"#
     );
-    columns[0].id.free();
+    assert_eq!(
+        update_body(&columns[..1], &values[1..], RUST_EXT_TABLE_UPDATE).unwrap_err(),
+        "Superhuman Docs does not support updating a cell to NULL"
+    );
+    drop(unsafe { Box::from_raw(column) });
     values[0].string_value.free();
 }
 
@@ -106,22 +152,91 @@ fn equality_query_uses_json_literal() {
 
 #[test]
 fn scan_sort_by_returns_owned_string() {
-    let column = RustExtColumn {
-        id: alloc_string("createdAt"),
+    let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
+        id: "createdAt".to_string(),
+        name: "createdAt".to_string(),
+        format_type: "datetime".to_string(),
+        duckdb_type: "TIMESTAMPTZ".to_string(),
+        duckdb_type_alias: String::new(),
+        is_array: false,
         capabilities: RUST_EXT_COLUMN_SORT_ASC,
-        ..Default::default()
-    };
+    }));
     let mut sort_by = RustExtString::default();
-    assert!(crate::exports::rust_ext_scan_sort_by(column, &mut sort_by));
+    assert!(crate::exports::rust_ext_scan_sort_by(
+        column.cast(),
+        &mut sort_by
+    ));
     assert_eq!(sort_by.as_str(), "createdAt");
-    assert_ne!(sort_by.ptr, column.id.ptr);
+    assert_ne!(
+        sort_by.ptr,
+        unsafe { &*column }.id.as_ptr().cast_mut().cast()
+    );
     sort_by.free();
-    column.id.free();
+    drop(unsafe { Box::from_raw(column) });
+}
+
+#[test]
+fn scan_unwraps_superhuman_docs_rich_text_fences() {
+    let column = SuperhumanDocsColumn {
+        id: "c1".to_string(),
+        name: "Name".to_string(),
+        format_type: "text".to_string(),
+        duckdb_type: "VARCHAR".to_string(),
+        duckdb_type_alias: String::new(),
+        is_array: false,
+        capabilities: 0,
+    };
+    let row = SuperhumanDocsRow {
+        id: "r1".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+        deleted: false,
+        cells: vec![SuperhumanDocsCell {
+            column_id: "c1".to_string(),
+            value: Value::String("```Alpha```".to_string()),
+        }],
+    };
+    let value = scan_value(&column, &row);
+    assert_eq!(value.value.as_str(), "Alpha");
+    crate::exports::rust_ext_free_scan_value(value);
+}
+
+#[test]
+fn scan_normalizes_superhuman_docs_rich_percentage() {
+    let column = SuperhumanDocsColumn {
+        id: "c1".to_string(),
+        name: "Percent".to_string(),
+        format_type: "percent".to_string(),
+        duckdb_type: "DECIMAL(38,20)".to_string(),
+        duckdb_type_alias: String::new(),
+        is_array: false,
+        capabilities: 0,
+    };
+    for (raw, expected) in [
+        (json!(0.125), "0.125"),
+        (json!("25\u{a0}%"), "0.25"),
+        (json!("80\u{202f}%"), "0.8"),
+    ] {
+        let row = SuperhumanDocsRow {
+            id: "r1".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            deleted: false,
+            cells: vec![SuperhumanDocsCell {
+                column_id: "c1".to_string(),
+                value: raw,
+            }],
+        };
+        let value = scan_value(&column, &row);
+        assert_eq!(value.value.as_str(), expected);
+        crate::exports::rust_ext_free_scan_value(value);
+    }
 }
 
 #[test]
 fn token_validation_uses_whoami_status() {
-    let server = MockCodaServer::start();
+    let _network_guard = NETWORK_UNIT_TEST_LOCK.lock().unwrap();
+    let server = MockSuperhumanDocsServer::start();
     validate_token_at(&server.base_url(), "mock-token").unwrap();
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
@@ -135,8 +250,9 @@ fn token_validation_uses_whoami_status() {
         "expected bearer token in request headers: {}",
         requests[0].headers
     );
+    drop(server);
 
-    let server = MockCodaServer::start_with_whoami_status("401 Unauthorized");
+    let server = MockSuperhumanDocsServer::start_with_whoami_status("401 Unauthorized");
     let error = validate_token_at(&server.base_url(), "bad-token").unwrap_err();
     assert_eq!(
         error,
@@ -146,7 +262,10 @@ fn token_validation_uses_whoami_status() {
 
 #[test]
 fn token_environment_variable_is_read_eagerly() {
-    let name = format!("DUCKDB_CODA_TOKEN_ENV_TEST_{}", std::process::id());
+    let name = format!(
+        "DUCKDB_SUPERHUMAN_DOCS_TOKEN_ENV_TEST_{}",
+        std::process::id()
+    );
     env::set_var(&name, "resolved-token");
     assert_eq!(read_environment_variable(&name).unwrap(), "resolved-token");
     env::remove_var(&name);
@@ -154,13 +273,319 @@ fn token_environment_variable_is_read_eagerly() {
 }
 
 #[test]
+fn browser_urls_expose_embedded_doc_ids() {
+    assert!(is_browser_url(
+        "https://coda.io/d/Launch-Status_dAbCDeFGH/Page_su123"
+    ));
+    assert!(is_browser_url("http://localhost:8080/d/Test_dmock-doc"));
+    assert!(!is_browser_url("AbCDeFGH"));
+    assert_eq!(
+        doc_id_from_browser_url("https://coda.io/d/Launch-Status_dAbCDeFGH/Page_su123"),
+        Some("AbCDeFGH".to_string())
+    );
+    assert_eq!(
+        doc_id_from_browser_url("https://example.com/published/launch-status"),
+        None
+    );
+}
+
+#[test]
+fn attach_resource_prefixes_are_stripped() {
+    for prefix in [
+        "coda:",
+        "superhuman:",
+        "superhuman-docs:",
+        "superhuman_docs:",
+    ] {
+        assert_eq!(
+            strip_attach_resource_prefix(&format!("{prefix}https://coda.io/d/_dDoc")),
+            "https://coda.io/d/_dDoc"
+        );
+    }
+    assert_eq!(strip_attach_resource_prefix("doc-id"), "doc-id");
+}
+
+#[test]
+fn resolved_links_map_doc_resources_to_their_containing_doc() {
+    assert_eq!(
+        doc_id_from_resolved_link(
+            r#"{"resource":{"type":"doc","id":"doc-1","href":"https://coda.io/apis/v1/docs/doc-1"}}"#
+        )
+        .unwrap(),
+        "doc-1"
+    );
+    assert_eq!(
+        doc_id_from_resolved_link(
+            r#"{"resource":{"type":"table","id":"table-1","href":"https://coda.io/apis/v1/docs/doc-2/tables/table-1"}}"#
+        )
+        .unwrap(),
+        "doc-2"
+    );
+    let error = doc_id_from_resolved_link(
+        r#"{"resource":{"type":"folder","id":"folder-1","href":"https://coda.io/apis/v1/folders/folder-1"}}"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("not contained by a document"));
+    assert!(doc_id_from_resolved_link("not-json")
+        .unwrap_err()
+        .contains("invalid ResolveBrowserLink response"));
+}
+
+#[derive(Default)]
+struct TestAttachHostContext {
+    options: HashMap<String, String>,
+    secrets: HashMap<String, String>,
+}
+
+unsafe extern "C" fn test_attach_get_option(
+    userdata: *mut c_void,
+    name: *const c_char,
+    out: *mut RustExtString,
+    _err: *mut RustExtError,
+) -> bool {
+    let context = unsafe { &*(userdata.cast::<TestAttachHostContext>()) };
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    let value = context
+        .options
+        .get(name.as_ref())
+        .map(String::as_str)
+        .unwrap_or("");
+    unsafe { out.write(alloc_string(value)) };
+    true
+}
+
+unsafe extern "C" fn test_attach_lookup_secret(
+    userdata: *mut c_void,
+    scope: RustExtString,
+    _secret_type: *const c_char,
+    _secret_key: *const c_char,
+    out: *mut RustExtString,
+    _err: *mut RustExtError,
+) -> bool {
+    let context = unsafe { &*(userdata.cast::<TestAttachHostContext>()) };
+    let value = context
+        .secrets
+        .get(scope.as_str())
+        .map(String::as_str)
+        .unwrap_or("");
+    unsafe { out.write(alloc_string(value)) };
+    true
+}
+
+fn test_attach_host() -> RustExtAttachHost {
+    RustExtAttachHost {
+        get_option: test_attach_get_option,
+        lookup_secret: test_attach_lookup_secret,
+    }
+}
+
+fn inspect_attach_config<T>(config: RustExtAttachConfig, inspect: T)
+where
+    T: FnOnce(&SuperhumanDocsClientConfig),
+{
+    let inner = unsafe { &*config.handle.cast::<SuperhumanDocsClientConfig>() };
+    inspect(inner);
+    crate::exports::rust_ext_free_attach_config(config);
+}
+
+#[test]
+fn attach_mutation_options_have_defaults_and_parse_explicit_values() {
+    let host = test_attach_host();
+    let mut defaults = TestAttachHostContext::default();
+    defaults
+        .options
+        .insert("token".to_string(), "explicit-token".to_string());
+    let config = resolve_attach(
+        borrow_string("mock-doc"),
+        &host,
+        (&mut defaults as *mut TestAttachHostContext).cast(),
+    )
+    .unwrap();
+    inspect_attach_config(config, |config| {
+        assert!(!config.wait_for_mutations);
+        assert_eq!(config.mutation_timeout_seconds, 60);
+        assert!(!config.allow_mutation_warnings);
+    });
+
+    let mut explicit = TestAttachHostContext::default();
+    explicit
+        .options
+        .insert("token".to_string(), "explicit-token".to_string());
+    explicit
+        .options
+        .insert("wait_for_mutations".to_string(), "true".to_string());
+    explicit
+        .options
+        .insert("mutation_timeout_seconds".to_string(), "17".to_string());
+    explicit
+        .options
+        .insert("allow_mutation_warnings".to_string(), "true".to_string());
+    let config = resolve_attach(
+        borrow_string("mock-doc"),
+        &host,
+        (&mut explicit as *mut TestAttachHostContext).cast(),
+    )
+    .unwrap();
+    inspect_attach_config(config, |config| {
+        assert!(config.wait_for_mutations);
+        assert_eq!(config.mutation_timeout_seconds, 17);
+        assert!(config.allow_mutation_warnings);
+    });
+}
+
+#[test]
+fn browser_url_resolution_supports_scoped_general_and_explicit_credentials() {
+    let _network_guard = NETWORK_UNIT_TEST_LOCK.lock().unwrap();
+    let host = test_attach_host();
+
+    let scoped_server = MockSuperhumanDocsServer::start();
+    let mut scoped = TestAttachHostContext::default();
+    scoped
+        .options
+        .insert("api_base".to_string(), scoped_server.base_url());
+    scoped.secrets.insert(
+        "superhuman_docs:mock-doc".to_string(),
+        "scoped-token".to_string(),
+    );
+    let config = resolve_attach(
+        borrow_string("https://coda.io/d/Mock_dmock-doc/Page_su123"),
+        &host,
+        (&mut scoped as *mut TestAttachHostContext).cast(),
+    )
+    .unwrap();
+    inspect_attach_config(config, |config| {
+        assert_eq!(config.resource, "mock-doc");
+        assert_eq!(config.credential, "scoped-token");
+    });
+    assert!(scoped_server.requests().iter().all(|request| request
+        .headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("Authorization: Bearer scoped-token"))));
+    drop(scoped_server);
+
+    let general_server = MockSuperhumanDocsServer::start();
+    let mut general = TestAttachHostContext::default();
+    general
+        .options
+        .insert("api_base".to_string(), general_server.base_url());
+    general
+        .secrets
+        .insert("superhuman_docs:".to_string(), "general-token".to_string());
+    general.secrets.insert(
+        "superhuman_docs:mock-doc".to_string(),
+        "canonical-token".to_string(),
+    );
+    let config = resolve_attach(
+        borrow_string("https://example.com/published/launch-status"),
+        &host,
+        (&mut general as *mut TestAttachHostContext).cast(),
+    )
+    .unwrap();
+    inspect_attach_config(config, |config| {
+        assert_eq!(config.resource, "mock-doc");
+        assert_eq!(config.credential, "canonical-token");
+    });
+    assert!(general_server.requests().iter().all(|request| request
+        .headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("Authorization: Bearer general-token"))));
+    drop(general_server);
+
+    let explicit_server = MockSuperhumanDocsServer::start();
+    let mut explicit = TestAttachHostContext::default();
+    explicit
+        .options
+        .insert("api_base".to_string(), explicit_server.base_url());
+    explicit
+        .options
+        .insert("token".to_string(), "explicit-token".to_string());
+    explicit.secrets.insert(
+        "superhuman_docs:mock-doc".to_string(),
+        "ignored-token".to_string(),
+    );
+    let config = resolve_attach(
+        borrow_string("https://coda.io/d/Mock_dmock-doc"),
+        &host,
+        (&mut explicit as *mut TestAttachHostContext).cast(),
+    )
+    .unwrap();
+    inspect_attach_config(config, |config| {
+        assert_eq!(config.resource, "mock-doc");
+        assert_eq!(config.credential, "explicit-token");
+    });
+}
+
+#[test]
+fn noncanonical_browser_url_without_bootstrap_credential_is_targeted_error() {
+    let host = test_attach_host();
+    let mut context = TestAttachHostContext::default();
+    let error = match resolve_attach(
+        borrow_string("https://example.com/published/launch-status"),
+        &host,
+        (&mut context as *mut TestAttachHostContext).cast(),
+    ) {
+        Ok(config) => {
+            crate::exports::rust_ext_free_attach_config(config);
+            panic!("browser URL without a bootstrap credential unexpectedly resolved")
+        }
+        Err(error) => error,
+    };
+    assert!(error.contains("browser URL attachment requires TOKEN"));
+    assert!(error.contains("general superhuman_docs secret"));
+}
+
+#[test]
+fn secret_policy_is_implemented_by_rust_callback() {
+    let result = create_secret(RustExtSecretCreateInput {
+        secret_type: borrow_string("superhuman_docs"),
+        provider: borrow_string("config"),
+        name: borrow_string("test"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(result.scope_count, 1);
+    assert_eq!(unsafe { &*result.scope }.as_str(), "superhuman_docs:");
+    assert_eq!(result.entry_count, 0);
+    assert_eq!(result.redact_key_count, 1);
+    assert_eq!(unsafe { &*result.redact_keys }.as_str(), "token");
+    free_secret(result);
+
+    let option = RustExtNamedValue {
+        name: borrow_string("unsupported"),
+        value: RustExtInputValue {
+            value_type: 5,
+            string_value: borrow_string("value"),
+            ..Default::default()
+        },
+    };
+    let error = match create_secret(RustExtSecretCreateInput {
+        secret_type: borrow_string("superhuman_docs"),
+        provider: borrow_string("config"),
+        name: borrow_string("test"),
+        options: &option,
+        option_count: 1,
+        ..Default::default()
+    }) {
+        Ok(result) => {
+            free_secret(result);
+            panic!("unsupported secret parameter unexpectedly succeeded")
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        "Unknown named parameter for superhuman_docs secret: unsupported"
+    );
+}
+
+#[test]
 #[ignore]
-fn duckdb_mock_coda_scan_metadata_and_dml() {
-    let server = MockCodaServer::start();
-    let table = "coda_doc.main.\"Tasks\"";
+fn duckdb_mock_superhuman_docs_scan_metadata_and_dml() {
+    let server = MockSuperhumanDocsServer::start();
+    let table = "superhuman_docs_doc.main.\"Tasks\"";
     let sql = format!(
         "LOAD {};\
-         ATTACH 'mock-doc' AS coda_doc (TYPE coda, TOKEN 'mock-token', API_BASE {}, INCLUDE_ROW_METADATA true);\
+         ATTACH 'mock-doc' AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {}, INCLUDE_ROW_METADATA true);\
          SELECT \"Name\", \"Done\", \"Amount\" FROM {table} ORDER BY \"Name\";\
          SELECT \"Name\" FROM {table} WHERE \"Name\" = 'Alpha';\
          SELECT \"Name\", createdAt FROM {table} ORDER BY createdAt LIMIT 1;\
@@ -212,14 +637,168 @@ fn duckdb_mock_coda_scan_metadata_and_dml() {
 
 #[test]
 #[ignore]
-fn duckdb_mock_coda_token_env_for_attach() {
-    let server = MockCodaServer::start();
-    let env_name = "DUCKDB_CODA_MOCK_API_TOKEN";
+fn duckdb_mock_superhuman_docs_waits_for_mutations() {
+    let server = MockSuperhumanDocsServer::start();
+    let table = "superhuman_docs_doc.main.\"Tasks\"";
     let sql = format!(
         "LOAD {};
-         ATTACH 'mock-doc' AS coda_attach_env
-             (TYPE coda, TOKEN_ENV {}, API_BASE {});
-         SELECT count(*) FROM coda_attach_env.main.\"Tasks\";",
+         ATTACH 'mock-doc' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {},
+              WAIT_FOR_MUTATIONS true, MUTATION_TIMEOUT_SECONDS 2,
+              ALLOW_MUTATION_WARNINGS false);
+         INSERT INTO {table} (\"Name\", \"Done\", \"Amount\") VALUES ('Wait', false, 3.5);
+         UPDATE {table} SET \"Done\" = false WHERE \"Name\" = 'Alpha';
+         DELETE FROM {table} WHERE \"Name\" = 'Beta';",
+        sql_literal(extension_path()),
+        sql_literal(&server.base_url())
+    );
+    run_duckdb(&sql);
+    let requests = server.requests();
+    assert!(requests.iter().any(|request| {
+        request.method == "GET" && request.path == "/mutationStatus/wait-request"
+    }));
+    assert!(requests.iter().any(|request| {
+        request.method == "GET" && request.path == "/mutationStatus/update-request"
+    }));
+    assert!(requests.iter().any(|request| {
+        request.method == "GET" && request.path == "/mutationStatus/delete-request"
+    }));
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_superhuman_docs_applies_mutation_warning_policy() {
+    let server = MockSuperhumanDocsServer::start();
+    let table = "superhuman_docs_doc.main.\"Tasks\"";
+    let setup = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {},
+              WAIT_FOR_MUTATIONS true, MUTATION_TIMEOUT_SECONDS 2);",
+        sql_literal(extension_path()),
+        sql_literal(&server.base_url())
+    );
+    let (success, output) = run_duckdb_command_after_setup(
+        &setup,
+        &format!(
+            "INSERT INTO {table} (\"Name\", \"Done\", \"Amount\") VALUES ('Warn', false, 3.5);"
+        ),
+    );
+    assert!(!success, "{output}");
+    assert!(output.contains("completed with a warning"), "{output}");
+    assert!(output.contains("cannot be rolled back"), "{output}");
+
+    let server = MockSuperhumanDocsServer::start();
+    let sql = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {},
+              WAIT_FOR_MUTATIONS true, MUTATION_TIMEOUT_SECONDS 2,
+              ALLOW_MUTATION_WARNINGS true);
+         INSERT INTO {table} (\"Name\", \"Done\", \"Amount\") VALUES ('Warn', false, 3.5);",
+        sql_literal(extension_path()),
+        sql_literal(&server.base_url())
+    );
+    run_duckdb(&sql);
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_superhuman_docs_reports_mutation_timeout() {
+    let server = MockSuperhumanDocsServer::start();
+    let table = "superhuman_docs_doc.main.\"Tasks\"";
+    let setup = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {},
+              WAIT_FOR_MUTATIONS true, MUTATION_TIMEOUT_SECONDS 1);",
+        sql_literal(extension_path()),
+        sql_literal(&server.base_url())
+    );
+    let (success, output) = run_duckdb_command_after_setup(
+        &setup,
+        &format!(
+            "INSERT INTO {table} (\"Name\", \"Done\", \"Amount\") VALUES ('Timeout', false, 3.5);"
+        ),
+    );
+    assert!(!success, "{output}");
+    assert!(
+        output.contains("did not complete within 1 seconds"),
+        "{output}"
+    );
+    assert!(output.contains("may occur later"), "{output}");
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_superhuman_docs_attaches_browser_urls() {
+    for prefix in ["coda:", "superhuman:", "superhuman-docs:"] {
+        let server = MockSuperhumanDocsServer::start();
+        let browser_url = format!("{prefix}https://coda.io/d/Mock_dmock-doc/Table_table-link");
+        let sql = format!(
+            "LOAD {};
+             ATTACH {} AS superhuman_docs_doc
+                 (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {});
+             SELECT count(*) FROM superhuman_docs_doc.main.\"Tasks\";",
+            sql_literal(extension_path()),
+            sql_literal(&browser_url),
+            sql_literal(&server.base_url())
+        );
+        let output = run_duckdb(&sql);
+        assert!(output.lines().any(|line| line == "2"), "{output}");
+        let requests = server.requests();
+        assert!(requests.iter().any(|request| {
+            request.method == "GET"
+                && request.path == "/resolveBrowserLink"
+                && request.query.contains("degradeGracefully=false")
+                && request.query.contains("table-link")
+        }));
+        assert!(requests
+            .iter()
+            .any(|request| { request.method == "GET" && request.path == "/docs/mock-doc/tables" }));
+    }
+
+    let direct_server = MockSuperhumanDocsServer::start();
+    let direct_sql = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {});
+         SELECT count(*) FROM superhuman_docs_doc.main.\"Tasks\";",
+        sql_literal(extension_path()),
+        sql_literal(&direct_server.base_url())
+    );
+    run_duckdb(&direct_sql);
+    assert!(!direct_server
+        .requests()
+        .iter()
+        .any(|request| request.path == "/resolveBrowserLink"));
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_superhuman_docs_rejects_non_doc_browser_resources() {
+    let server = MockSuperhumanDocsServer::start();
+    let setup = format!("LOAD {};", sql_literal(extension_path()));
+    let sql = format!(
+        "ATTACH 'coda:https://coda.io/folders/folder-link' AS superhuman_docs_doc
+             (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {});",
+        sql_literal(&server.base_url())
+    );
+    let (success, output) = run_duckdb_command_after_setup(&setup, &sql);
+    assert!(!success, "{output}");
+    assert!(output.contains("not contained by a document"), "{output}");
+}
+
+#[test]
+#[ignore]
+fn duckdb_mock_superhuman_docs_token_env_for_attach() {
+    let server = MockSuperhumanDocsServer::start();
+    let env_name = "DUCKDB_SUPERHUMAN_DOCS_MOCK_API_TOKEN";
+    let sql = format!(
+        "LOAD {};
+         ATTACH 'mock-doc' AS superhuman_docs_attach_env
+             (TYPE superhuman_docs, TOKEN_ENV {}, API_BASE {});
+         SELECT count(*) FROM superhuman_docs_attach_env.main.\"Tasks\";",
         sql_literal(extension_path()),
         sql_literal(env_name),
         sql_literal(&server.base_url())
@@ -238,14 +817,14 @@ fn duckdb_mock_coda_token_env_for_attach() {
 
 #[test]
 #[ignore]
-fn duckdb_mock_coda_wide_types() {
-    let server = MockCodaServer::start();
-    let table = "coda_doc.main.\"Wide Types\"";
+fn duckdb_mock_superhuman_docs_wide_types() {
+    let server = MockSuperhumanDocsServer::start();
+    let table = "superhuman_docs_doc.main.\"Wide Types\"";
     let sql = format!(
         "LOAD {};\
-         ATTACH 'mock-doc' AS coda_doc (TYPE coda, TOKEN 'mock-token', API_BASE {});\
+         ATTACH 'mock-doc' AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {});\
          SELECT column_name, data_type FROM information_schema.columns \
-         WHERE table_catalog = 'coda_doc' AND table_schema = 'main' AND table_name = 'Wide Types' \
+         WHERE table_catalog = 'superhuman_docs_doc' AND table_schema = 'main' AND table_name = 'Wide Types' \
          ORDER BY ordinal_position;\
          SELECT \"Checkbox\", \"Text\", \"Email\", \"Select\", \
                 \"Number\", \"Percent\", \"Slider\", \"Scale\", \
@@ -314,20 +893,21 @@ fn duckdb_mock_coda_wide_types() {
 
 #[test]
 #[ignore]
-fn duckdb_mock_coda_rejects_explicit_transactions() {
-    let server = MockCodaServer::start();
+fn duckdb_mock_superhuman_docs_rejects_explicit_transactions() {
+    let server = MockSuperhumanDocsServer::start();
     let setup = format!(
         "LOAD {};\
-         ATTACH 'mock-doc' AS coda_doc (TYPE coda, TOKEN 'mock-token', API_BASE {});",
+         ATTACH 'mock-doc' AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN 'mock-token', API_BASE {});",
         sql_literal(extension_path()),
         sql_literal(&server.base_url())
     );
     let (success, output) = run_duckdb_command_after_setup(
         &setup,
-        "BEGIN TRANSACTION; INSERT INTO coda_doc.main.\"Tasks\" (\"Name\", \"Done\", \"Amount\") VALUES ('Txn', false, 9.0); ROLLBACK;",
+        "BEGIN TRANSACTION; INSERT INTO superhuman_docs_doc.main.\"Tasks\" (\"Name\", \"Done\", \"Amount\") VALUES ('Txn', false, 9.0); ROLLBACK;",
     );
     assert!(
-        !success && output.contains("Coda does not support explicit DuckDB transactions"),
+        !success
+            && output.contains("Superhuman Docs does not support explicit DuckDB transactions"),
         "{output}\nrequests: {:#?}",
         server.requests()
     );
@@ -342,24 +922,22 @@ fn duckdb_mock_coda_rejects_explicit_transactions() {
 
 #[test]
 #[ignore]
-fn real_coda_api_smoke() {
-    let credential = required_env("CODA_TEST_API_TOKEN");
-    let endpoint = env::var("CODA_TEST_API_BASE")
+fn real_superhuman_docs_api_smoke() {
+    let credential = required_env("SUPERHUMAN_DOCS_TEST_API_TOKEN");
+    let endpoint = env::var("SUPERHUMAN_DOCS_TEST_API_BASE")
         .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
         .trim_end_matches('/')
         .to_string();
-    let resource = env::var("CODA_TEST_DOC_ID").unwrap_or_else(|_| {
-        first_editable_doc(&endpoint, &credential).expect("no editable Coda doc found")
-    });
+    let resource = required_env("SUPERHUMAN_DOCS_TEST_DOC_ID");
 
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let page_name = format!("duckdb-coda-test-{run_id}");
-    let table_name = format!("duckdb_coda_test_{run_id}");
+    let page_name = format!("duckdb-superhuman-docs-test-{run_id}");
+    let table_name = format!("duckdb_superhuman_docs_test_{run_id}");
     let page = create_test_page(&endpoint, &credential, &resource, &page_name, &table_name)
-        .expect("failed to create Coda test page");
+        .expect("failed to create Superhuman Docs test page");
     let page_id = page
         .get("id")
         .and_then(Value::as_str)
@@ -374,7 +952,7 @@ fn real_coda_api_smoke() {
 
     let discovered_table =
         wait_for_page_table(&endpoint, &credential, &resource, &page_id, &table_name)
-            .expect("timed out waiting for generated Coda table");
+            .expect("timed out waiting for generated Superhuman Docs table");
     let table_id = discovered_table
         .get("id")
         .and_then(Value::as_str)
@@ -393,21 +971,40 @@ fn real_coda_api_smoke() {
 
 #[test]
 #[ignore]
-fn real_coda_api_wide_types() {
-    let credential = required_env("CODA_TEST_API_TOKEN");
-    let endpoint = env::var("CODA_TEST_API_BASE")
+fn real_superhuman_docs_api_wide_types() {
+    let credential = required_env("SUPERHUMAN_DOCS_TEST_API_TOKEN");
+    let endpoint = env::var("SUPERHUMAN_DOCS_TEST_API_BASE")
         .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
         .trim_end_matches('/')
         .to_string();
-    let resource = required_env("CODA_TEST_DOC_ID");
-    let configured_table = required_env("CODA_TEST_WIDE_TABLE_ID");
-    let (table_id, table_name) =
-        resolve_table_identity(&endpoint, &credential, &resource, &configured_table)
-            .expect("could not find CODA_TEST_WIDE_TABLE_ID in CODA_TEST_DOC_ID");
+    let resource = required_env("SUPERHUMAN_DOCS_TEST_DOC_ID");
 
-    assert_wide_column_formats(&endpoint, &credential, &resource, &table_id)
-        .expect("real Coda wide-table fixture has missing or incorrectly formatted columns");
-    run_duckdb_real_wide_type_case(&resource, &credential, &endpoint, &table_name);
+    run_duckdb_real_wide_types_schema_case(
+        &resource,
+        &credential,
+        &endpoint,
+        REAL_WIDE_TYPES_TABLE,
+    );
+    run_duckdb_real_wide_types_dml_case(&resource, &credential, &endpoint);
+}
+
+#[test]
+#[ignore]
+fn real_superhuman_docs_api_wide_types_fixture_select_only() {
+    let credential = required_env("SUPERHUMAN_DOCS_TEST_API_TOKEN");
+    let endpoint = env::var("SUPERHUMAN_DOCS_TEST_API_BASE")
+        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let resource = required_env("SUPERHUMAN_DOCS_TEST_DOC_ID");
+
+    run_duckdb_real_wide_types_schema_case(
+        &resource,
+        &credential,
+        &endpoint,
+        REAL_WIDE_TYPES_FIXTURE_TABLE,
+    );
+    run_duckdb_real_wide_types_fixture_select_case(&resource, &credential, &endpoint);
 }
 
 #[derive(Clone, Debug)]
@@ -419,27 +1016,28 @@ struct MockRequest {
     body: String,
 }
 
-struct MockCodaServer {
+struct MockSuperhumanDocsServer {
     address: String,
     requests: Arc<Mutex<Vec<MockRequest>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
-impl MockCodaServer {
+impl MockSuperhumanDocsServer {
     fn start() -> Self {
         Self::start_with_whoami_status("200 OK")
     }
 
     fn start_with_whoami_status(whoami_status: &'static str) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind mock Coda server");
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("failed to bind mock Superhuman Docs server");
         let address = listener
             .local_addr()
-            .expect("failed to read mock Coda server address")
+            .expect("failed to read mock Superhuman Docs server address")
             .to_string();
         listener
             .set_nonblocking(true)
-            .expect("failed to configure mock Coda server");
+            .expect("failed to configure mock Superhuman Docs server");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_requests = Arc::clone(&requests);
@@ -453,7 +1051,9 @@ impl MockCodaServer {
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(err) => panic!("mock Coda server failed to accept connection: {err}"),
+                Err(err) => {
+                    panic!("mock Superhuman Docs server failed to accept connection: {err}")
+                }
             }
         });
         Self {
@@ -473,12 +1073,14 @@ impl MockCodaServer {
     }
 }
 
-impl Drop for MockCodaServer {
+impl Drop for MockSuperhumanDocsServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.address);
         if let Some(handle) = self.handle.take() {
-            handle.join().expect("mock Coda server thread panicked");
+            handle
+                .join()
+                .expect("mock Superhuman Docs server thread panicked");
         }
     }
 }
@@ -494,7 +1096,7 @@ fn handle_mock_connection(
     loop {
         let read = stream
             .read(&mut temp)
-            .expect("failed to read mock Coda request");
+            .expect("failed to read mock Superhuman Docs request");
         if read == 0 {
             return;
         }
@@ -519,7 +1121,7 @@ fn handle_mock_connection(
     while buffer.len() < body_start + content_length {
         let read = stream
             .read(&mut temp)
-            .expect("failed to read mock Coda request body");
+            .expect("failed to read mock Superhuman Docs request body");
         if read == 0 {
             break;
         }
@@ -536,15 +1138,29 @@ fn handle_mock_connection(
         .unwrap_or_else(|| (target.to_string(), String::new()));
     let body =
         String::from_utf8_lossy(&buffer[body_start..body_start + content_length]).to_string();
-    requests.lock().unwrap().push(MockRequest {
-        method: method.clone(),
-        path: path.clone(),
-        query: query.clone(),
-        headers,
-        body: body.clone(),
-    });
+    let request_occurrence = {
+        let mut requests = requests.lock().unwrap();
+        requests.push(MockRequest {
+            method: method.clone(),
+            path: path.clone(),
+            query: query.clone(),
+            headers,
+            body: body.clone(),
+        });
+        requests
+            .iter()
+            .filter(|request| request.method == method && request.path == path)
+            .count()
+    };
 
-    let (status, response_body) = mock_response(&method, &path, &query, whoami_status);
+    let (status, response_body) = mock_response(
+        &method,
+        &path,
+        &query,
+        &body,
+        request_occurrence,
+        whoami_status,
+    );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response_body.len(),
@@ -552,7 +1168,7 @@ fn handle_mock_connection(
     );
     stream
         .write_all(response.as_bytes())
-        .expect("failed to write mock Coda response");
+        .expect("failed to write mock Superhuman Docs response");
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -563,10 +1179,51 @@ fn mock_response(
     method: &str,
     path: &str,
     query: &str,
+    body: &str,
+    request_occurrence: usize,
     whoami_status: &'static str,
 ) -> (&'static str, String) {
     match (method, path) {
         ("GET", "/whoami") => (whoami_status, "not valid JSON".to_string()),
+        ("GET", "/resolveBrowserLink") if query.contains("folder-link") => (
+            "200 OK",
+            json!({
+                "type": "apiLink",
+                "href": "https://coda.io/apis/v1/resolveBrowserLink",
+                "resource": {
+                    "type": "folder",
+                    "id": "folder-1",
+                    "href": "https://coda.io/apis/v1/folders/folder-1"
+                }
+            })
+            .to_string(),
+        ),
+        ("GET", "/resolveBrowserLink") if query.contains("table-link") => (
+            "200 OK",
+            json!({
+                "type": "apiLink",
+                "href": "https://coda.io/apis/v1/resolveBrowserLink",
+                "resource": {
+                    "type": "table",
+                    "id": "tbl1",
+                    "href": "https://coda.io/apis/v1/docs/mock-doc/tables/tbl1"
+                }
+            })
+            .to_string(),
+        ),
+        ("GET", "/resolveBrowserLink") => (
+            "200 OK",
+            json!({
+                "type": "apiLink",
+                "href": "https://coda.io/apis/v1/resolveBrowserLink",
+                "resource": {
+                    "type": "doc",
+                    "id": "mock-doc",
+                    "href": "https://coda.io/apis/v1/docs/mock-doc"
+                }
+            })
+            .to_string(),
+        ),
         ("GET", "/docs/mock-doc/tables") => (
             "200 OK",
             json!({
@@ -622,9 +1279,43 @@ fn mock_response(
         ("GET", "/docs/mock-doc/tables/tbl_wide/rows") => {
             ("200 OK", mock_wide_rows_response(query))
         }
-        ("POST", "/docs/mock-doc/tables/tbl1/rows")
-        | ("PUT", "/docs/mock-doc/tables/tbl1/rows/r1")
-        | ("DELETE", "/docs/mock-doc/tables/tbl1/rows") => ("202 Accepted", "{}".to_string()),
+        ("POST", "/docs/mock-doc/tables/tbl1/rows") => {
+            let request_id = if body.contains("\"Warn\"") {
+                "warning-request"
+            } else if body.contains("\"Timeout\"") {
+                "timeout-request"
+            } else if body.contains("\"Wait\"") {
+                "wait-request"
+            } else {
+                "insert-request"
+            };
+            (
+                "202 Accepted",
+                json!({"requestId": request_id, "addedRowIds": ["new-row"]}).to_string(),
+            )
+        }
+        ("PUT", "/docs/mock-doc/tables/tbl1/rows/r1") => (
+            "202 Accepted",
+            json!({"requestId": "update-request", "id": "r1"}).to_string(),
+        ),
+        ("DELETE", "/docs/mock-doc/tables/tbl1/rows") => (
+            "202 Accepted",
+            json!({"requestId": "delete-request", "rowIds": ["r2"]}).to_string(),
+        ),
+        ("GET", "/mutationStatus/warning-request") => (
+            "200 OK",
+            json!({"completed": true, "warning": "mock mutation warning"}).to_string(),
+        ),
+        ("GET", "/mutationStatus/timeout-request") => {
+            ("200 OK", json!({"completed": false}).to_string())
+        }
+        ("GET", "/mutationStatus/wait-request") if request_occurrence == 1 => (
+            "404 Not Found",
+            json!({"message": "mutation status is not visible yet"}).to_string(),
+        ),
+        ("GET", path) if path.starts_with("/mutationStatus/") => {
+            ("200 OK", json!({"completed": true}).to_string())
+        }
         _ => (
             "404 Not Found",
             json!({"error": format!("unexpected mock request {method} {path}")}).to_string(),
@@ -790,32 +1481,6 @@ fn paged_items<T>(
     }
 }
 
-fn first_editable_doc(endpoint: &str, credential: &str) -> Result<String, String> {
-    let sdk = SdkClient::at(endpoint, credential)?;
-    let docs = paged_items(&sdk, |client, page_token| {
-        client.docs().list(operations::ListDocsInput {
-            limit: Some(100),
-            page_token,
-            is_owner: None,
-            is_published: None,
-            query: None,
-            source_doc: None,
-            is_starred: None,
-            in_gallery: None,
-            workspace_id: None,
-            folder_id: None,
-        })
-    })?;
-    docs.into_iter()
-        .find(|doc| doc.get("canEdit").and_then(Value::as_bool).unwrap_or(false))
-        .and_then(|doc| {
-            doc.get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .ok_or_else(|| "no editable Coda doc found".to_string())
-}
-
 fn create_test_page(
     endpoint: &str,
     credential: &str,
@@ -834,6 +1499,16 @@ fn create_test_page(
          </tbody>\
          </table>"
     );
+    create_page_with_html(endpoint, credential, resource, page_name, html)
+}
+
+fn create_page_with_html(
+    endpoint: &str,
+    credential: &str,
+    resource: &str,
+    page_name: &str,
+    html: String,
+) -> Result<Value, String> {
     let payload = json!({
         "name": page_name,
         "pageContent": {
@@ -893,7 +1568,7 @@ fn wait_for_page_table(
                 let table_name = table.get("name").and_then(Value::as_str).unwrap_or("");
                 if table_name != wanted_table_name {
                     eprintln!(
-                        "Coda named integration table '{table_name}'; requested '{wanted_table_name}'"
+                        "Superhuman Docs named integration table '{table_name}'; requested '{wanted_table_name}'"
                     );
                 }
                 return Ok(table.clone());
@@ -901,7 +1576,7 @@ fn wait_for_page_table(
         }
         thread::sleep(Duration::from_secs(3));
     }
-    Err("timed out waiting for Coda table".to_string())
+    Err("timed out waiting for Superhuman Docs table".to_string())
 }
 
 fn assert_required_columns(
@@ -934,164 +1609,256 @@ fn assert_required_columns(
     Ok(())
 }
 
-fn assert_wide_column_formats(
-    endpoint: &str,
-    credential: &str,
-    resource: &str,
-    table_id: &str,
-) -> Result<(), String> {
-    let sdk = SdkClient::at(endpoint, credential)?;
-    let columns = paged_items(&sdk, |client, page_token| {
-        client
-            .tables()
-            .columns()
-            .list(operations::ListColumnsInput {
-                doc_id: resource.to_string(),
-                table_id_or_name: table_id.to_string(),
-                limit: Some(100),
-                page_token,
-                visible_only: Some(false),
-            })
-    })?;
-    for (name, format_type, expected_array) in [
-        ("Checkbox", "checkbox", false),
-        ("Text", "text", false),
-        ("Email", "email", false),
-        ("Select", "select", false),
-        ("Number", "number", false),
-        ("Percent", "percent", false),
-        ("Slider", "slider", false),
-        ("Scale", "scale", false),
-        ("Date", "date", false),
-        ("DateTime", "dateTime", false),
-        ("Time", "time", false),
-        ("Duration", "duration", false),
-        ("Currency", "currency", false),
-        ("Image", "image", false),
-        ("Person", "person", false),
-        ("Hyperlink", "link", false),
-        ("Lookup", "lookup", false),
-        ("Other", "canvas", false),
-        ("Durations", "duration", true),
-    ] {
-        let actual = columns
-            .iter()
-            .find(|column| column.get("name").and_then(Value::as_str) == Some(name))
-            .and_then(|column| column.get("format"))
-            .ok_or_else(|| format!("missing required wide-table column {name}"))?;
-        let actual_type = actual.get("type").and_then(Value::as_str).unwrap_or("");
-        let is_array = actual
-            .get("isArray")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if actual_type != format_type || is_array != expected_array {
-            return Err(format!(
-                "column {name} must have format {format_type} with isArray={expected_array}, got type={actual_type}, isArray={is_array}"
-            ));
-        }
-    }
-    Ok(())
+const REAL_WIDE_TYPES_TABLE: &str = "duckdb_coda_wide_types";
+const REAL_WIDE_TYPES_FIXTURE_TABLE: &str = "duckdb_coda_wide_types_fixture";
+const REAL_WIDE_TYPES_COLUMNS: &[(&str, &str)] = &[
+    ("col_text", "VARCHAR"),
+    ("col_number", "DECIMAL(38,20)"),
+    ("col_percentage", "DECIMAL(38,20)"),
+    (
+        "col_currency",
+        "STRUCT(currency VARCHAR, amount DECIMAL(38,20))",
+    ),
+    ("col_slider", "DECIMAL(38,20)"),
+    ("col_progress", "DECIMAL(38,20)"),
+    ("col_scale", "DECIMAL(38,20)"),
+    ("col_date", "DATE"),
+    ("col_time", "TIME"),
+    ("col_datetime", "TIMESTAMP WITH TIME ZONE"),
+    ("col_duration", "INTERVAL"),
+    ("col_canvas", "JSON"),
+    ("col_checkbox", "BOOLEAN"),
+    ("col_people", "STRUCT(\"name\" VARCHAR, email VARCHAR)"),
+    ("col_link", "STRUCT(\"name\" VARCHAR, url VARCHAR)"),
+    ("col_select", "VARCHAR"),
+    ("col_reaction", "JSON[]"),
+    (
+        "col_relation",
+        "STRUCT(\"name\" VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)",
+    ),
+    (
+        "col_reference",
+        "STRUCT(\"name\" VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)",
+    ),
+    ("col_button", "JSON"),
+    (
+        "col_image",
+        "STRUCT(\"name\" VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)[]",
+    ),
+    (
+        "col_image_url",
+        "STRUCT(\"name\" VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)",
+    ),
+    ("col_file", "JSON[]"),
+    (
+        "col_virtual_createdby",
+        "STRUCT(\"name\" VARCHAR, email VARCHAR)",
+    ),
+    ("col_toggle", "BOOLEAN"),
+    ("col_email", "VARCHAR"),
+];
+
+fn superhuman_docs_attach_sql(resource: &str, credential: &str, endpoint: &str) -> String {
+    format!(
+        "LOAD {}; ATTACH {} AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN {}, API_BASE {}, WAIT_FOR_MUTATIONS true);",
+        sql_literal(extension_path()),
+        sql_literal(resource),
+        sql_literal(credential),
+        sql_literal(endpoint),
+    )
 }
 
-fn resolve_table_identity(
-    endpoint: &str,
-    credential: &str,
-    resource: &str,
-    configured_table: &str,
-) -> Result<(String, String), String> {
-    let sdk = SdkClient::at(endpoint, credential)?;
-    let tables = paged_items(&sdk, |client, page_token| {
-        client.tables().list(operations::ListTablesInput {
-            doc_id: resource.to_string(),
-            limit: Some(100),
-            page_token,
-            sort_by: None,
-            table_types: None,
-        })
-    })?;
-    tables
-        .iter()
-        .find(|table| {
-            table.get("id").and_then(Value::as_str) == Some(configured_table)
-                || table.get("name").and_then(Value::as_str) == Some(configured_table)
-        })
-        .and_then(|table| {
-            Some((
-                table.get("id")?.as_str()?.to_string(),
-                table.get("name")?.as_str()?.to_string(),
-            ))
-        })
-        .ok_or_else(|| format!("table {configured_table} was not found"))
-}
-
-fn run_duckdb_real_wide_type_case(
+fn run_duckdb_real_wide_types_schema_case(
     resource: &str,
     credential: &str,
     endpoint: &str,
     table_name: &str,
 ) {
-    let table = format!("coda_doc.main.{}", sql_ident(table_name));
+    let expected = REAL_WIDE_TYPES_COLUMNS
+        .iter()
+        .map(|(name, data_type)| {
+            // The fixture enables multiple selections for its reference column.
+            let data_type =
+                if table_name == REAL_WIDE_TYPES_FIXTURE_TABLE && *name == "col_reference" {
+                    format!("{data_type}[]")
+                } else {
+                    data_type.to_string()
+                };
+            format!("({}, {})", sql_literal(name), sql_literal(&data_type))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
-        "LOAD {};\
-         ATTACH {} AS coda_doc (TYPE coda, TOKEN {}, API_BASE {});\
-         SELECT column_name, data_type FROM information_schema.columns \
-         WHERE table_catalog = 'coda_doc' AND table_schema = 'main' AND table_name = {} \
-         ORDER BY ordinal_position;\
-         SELECT count(*) > 0 AS has_populated_wide_row FROM {table} \
-         WHERE \"Checkbox\" IS NOT NULL AND \"Text\" IS NOT NULL AND \"Email\" IS NOT NULL \
-           AND \"Select\" IS NOT NULL AND \"Number\" IS NOT NULL AND \"Percent\" IS NOT NULL \
-           AND \"Slider\" IS NOT NULL AND \"Scale\" IS NOT NULL AND \"Date\" IS NOT NULL \
-           AND \"DateTime\" IS NOT NULL AND \"Time\" IS NOT NULL AND \"Duration\" IS NOT NULL \
-           AND \"Currency\".currency IS NOT NULL AND \"Currency\".amount IS NOT NULL \
-           AND \"Image\".name IS NOT NULL AND \"Image\".url IS NOT NULL \
-           AND \"Image\".height IS NOT NULL AND \"Image\".width IS NOT NULL AND \"Image\".status IS NOT NULL \
-           AND \"Person\".name IS NOT NULL AND \"Person\".email IS NOT NULL \
-           AND \"Hyperlink\".name IS NOT NULL AND \"Hyperlink\".url IS NOT NULL \
-           AND \"Lookup\".name IS NOT NULL AND \"Lookup\".url IS NOT NULL \
-           AND \"Lookup\".tableId IS NOT NULL AND \"Lookup\".tableUrl IS NOT NULL \
-           AND \"Lookup\".rowId IS NOT NULL AND \"Other\" IS NOT NULL \
-           AND len(\"Durations\") > 0 AND \"Durations\"[1] IS NOT NULL;",
-        sql_literal(extension_path()),
-        sql_literal(resource),
-        sql_literal(credential),
-        sql_literal(endpoint),
+        r#"{}
+        WITH expected(column_name, data_type) AS (VALUES {expected}),
+             actual AS (
+                 SELECT column_name, data_type FROM information_schema.columns
+                 WHERE table_catalog = 'superhuman_docs_doc' AND table_schema = 'main' AND table_name = {}
+             )
+        SELECT count(*) = {} AND (SELECT count(*) FROM actual) = {}
+               AND bool_and(actual.data_type = expected.data_type) AS schema_ok
+        FROM expected JOIN actual USING (column_name);"#,
+        superhuman_docs_attach_sql(resource, credential, endpoint),
         sql_literal(table_name),
+        REAL_WIDE_TYPES_COLUMNS.len(),
+        REAL_WIDE_TYPES_COLUMNS.len(),
     );
     let output = run_duckdb(&sql);
+    assert!(
+        output.contains("schema_ok\ntrue"),
+        "expected {table_name} to match the captured wide-type schema, got:\n{output}"
+    );
+}
+
+struct WideRowCleanup {
+    resource: String,
+    credential: String,
+    endpoint: String,
+    row_name: String,
+    active: bool,
+}
+
+impl WideRowCleanup {
+    fn sql(&self) -> String {
+        format!(
+            "{} DELETE FROM superhuman_docs_doc.main.{} WHERE col_text = {};",
+            superhuman_docs_attach_sql(&self.resource, &self.credential, &self.endpoint),
+            sql_ident(REAL_WIDE_TYPES_TABLE),
+            sql_literal(&self.row_name),
+        )
+    }
+
+    fn delete(&mut self) {
+        run_duckdb(&self.sql());
+        self.active = false;
+    }
+}
+
+impl Drop for WideRowCleanup {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let _ = Command::new("build/release/duckdb")
+            .env("TZ", "UTC")
+            .args(["-batch", "-csv", ":memory:", "-c", &self.sql()])
+            .output();
+    }
+}
+
+fn run_duckdb_real_wide_types_dml_case(resource: &str, credential: &str, endpoint: &str) {
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let row_name = format!("duckdb-superhuman-docs-wide-{run_id}");
+    let table = format!(
+        "superhuman_docs_doc.main.{}",
+        sql_ident(REAL_WIDE_TYPES_TABLE)
+    );
+    let mut cleanup = WideRowCleanup {
+        resource: resource.to_string(),
+        credential: credential.to_string(),
+        endpoint: endpoint.to_string(),
+        row_name: row_name.clone(),
+        active: true,
+    };
+    let insert_sql = format!(
+        "{} INSERT INTO {table} (\
+             col_text, col_number, col_percentage, col_slider, col_progress, col_scale,\
+             col_date, col_time, col_datetime, col_duration, col_canvas, col_checkbox, col_select,\
+             col_toggle, col_email\
+         ) VALUES (\
+             {}, 123.5, 0.375, 11, 0.4, 4, DATE '2026-07-17', TIME '12:34:56',\
+             TIMESTAMPTZ '2026-07-17 12:34:56+00', INTERVAL '1 hour 2 minutes 3 seconds', 'wide canvas',\
+             true, 'Done', false, 'probe@example.com'\
+         );",
+        superhuman_docs_attach_sql(resource, credential, endpoint),
+        sql_literal(&row_name),
+    );
+    run_duckdb(&insert_sql);
+
+    let select_sql = format!(
+        r#"{} SELECT col_text, col_number, col_percentage, col_slider, col_progress, col_scale,
+             col_date, col_time, col_datetime, col_duration,
+             col_canvas::VARCHAR LIKE '%wide canvas%' AS canvas_ok, col_checkbox, col_select,
+             col_toggle, col_email
+         FROM {table} WHERE col_text = {};"#,
+        superhuman_docs_attach_sql(resource, credential, endpoint),
+        sql_literal(&row_name),
+    );
+    let mut output = String::new();
+    for _ in 0..20 {
+        output = run_duckdb(&select_sql);
+        if output.contains(&row_name) {
+            break;
+        }
+        thread::sleep(Duration::from_secs(3));
+    }
+    cleanup.delete();
+
     for expected in [
-        "Checkbox,BOOLEAN",
-        "Text,VARCHAR",
-        "Email,VARCHAR",
-        "Select,VARCHAR",
-        "Number,\"DECIMAL(38,20)\"",
-        "Percent,\"DECIMAL(38,20)\"",
-        "Slider,\"DECIMAL(38,20)\"",
-        "Scale,\"DECIMAL(38,20)\"",
-        "Date,DATE",
-        "DateTime,TIMESTAMP WITH TIME ZONE",
-        "Time,TIME",
-        "Duration,INTERVAL",
-        "Currency,\"STRUCT(currency VARCHAR, amount DECIMAL(38,20))\"",
-        "Image,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)\"",
-        "Person,\"STRUCT(\"\"name\"\" VARCHAR, email VARCHAR)\"",
-        "Hyperlink,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR)\"",
-        "Lookup,\"STRUCT(\"\"name\"\" VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)\"",
-        "Other,JSON",
-        "Durations,INTERVAL[]",
-        "has_populated_wide_row\ntrue",
+        row_name.as_str(),
+        "123.50000000000000000000,0.37500000000000000000,11.00000000000000000000,0.40000000000000000000,4.00000000000000000000",
+        "2026-07-17,12:34:56,2026-07-17 12:34:56+00,01:02:03,true,true,Done,false,probe@example.com",
     ] {
         assert!(
             output.contains(expected),
-            "expected real wide-type output to contain '{expected}', got:\n{output}"
+            "expected mutable wide-type row output to contain '{expected}', got:\n{output}"
+        );
+    }
+}
+
+fn run_duckdb_real_wide_types_fixture_select_case(
+    resource: &str,
+    credential: &str,
+    endpoint: &str,
+) {
+    let table = format!(
+        "superhuman_docs_doc.main.{}",
+        sql_ident(REAL_WIDE_TYPES_FIXTURE_TABLE)
+    );
+    let sql = format!(
+        r#"{}
+         SELECT count(*) = 10 AS row_count_ok FROM {table};
+         SELECT col_text, col_number, col_slider, col_progress, col_scale
+         FROM {table} WHERE col_text IN ('Alice Johnson', 'James O''Brien') ORDER BY col_text;
+         SELECT col_text, col_percentage, col_currency.currency, col_currency.amount, col_date,
+                col_time, col_datetime, col_duration, col_checkbox, col_people.name AS person_name,
+                col_link.url AS link_url, col_select, col_relation.rowId AS relation_row_id,
+                col_image_url.url AS image_url, col_virtual_createdby.email AS created_by,
+                col_toggle, col_email
+         FROM {table} WHERE col_text IN ('Alice Johnson', 'James O''Brien') ORDER BY col_text;
+         SELECT col_text, col_canvas::VARCHAR AS canvas_json,
+                list_count(col_reaction) AS reaction_count,
+                list_count(col_reference) AS reference_count,
+                col_button::VARCHAR AS button_json,
+                col_image IS NULL AS image_null, col_file IS NULL AS file_null
+         FROM {table} WHERE col_text IN ('Alice Johnson', 'James O''Brien') ORDER BY col_text;"#,
+        superhuman_docs_attach_sql(resource, credential, endpoint),
+    );
+    let output = run_duckdb(&sql);
+    for expected in [
+        "row_count_ok\ntrue",
+        "Alice Johnson,42.00000000000000000000,3.00000000000000000000,0.10000000000000000000,3.00000000000000000000",
+        "\"James O'Brien\",12.50000000000000000000,10.00000000000000000000,1.00000000000000000000,2.00000000000000000000",
+        "Alice Johnson,0.25000000000000000000,EUR,1200.50000000000000000000,2024-01-15,09:00:00,2024-01-15 08:00:00+00,00:01:00,true,NULL,https://example.com/project-alpha,Not started,i-UcMngti-L2,https://picsum.photos/seed/row1/200/150,felix.testuser@outlook.com,false,alice@example.com",
+        "\"James O'Brien\",0.55000000000000000000,EUR,44.99000000000000000000,2025-12-25,23:00:00,2025-12-25 22:00:00+00,00:00:07,false,Felix Testuser,https://example.com/final-report,Done,NULL,https://picsum.photos/seed/row10/200/150,felix.testuser@outlook.com,false,james@example.com",
+        "Alice Johnson,\"\"\"**Project kickoff** meeting notes. Action items TBD.\"\"\",1,0,\"\"\"\"\"\",true,true",
+        "\"James O'Brien\",\"\"\"Final report submitted. *Project closed.*\"\"\",1,0,\"\"\"\"\"\",true,true",
+    ] {
+        assert!(
+            output.contains(expected),
+            "expected immutable wide-type fixture output to contain '{expected}', got:\n{output}"
         );
     }
 }
 
 fn run_duckdb_success_case(resource: &str, credential: &str, endpoint: &str, table_name: &str) {
-    let table = format!("coda_doc.main.{}", sql_ident(table_name));
+    let table = format!("superhuman_docs_doc.main.{}", sql_ident(table_name));
     let sql = format!(
         "LOAD {};\
-         ATTACH {} AS coda_doc (TYPE coda, TOKEN {}, API_BASE {});\
+         ATTACH {} AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN {}, API_BASE {}, WAIT_FOR_MUTATIONS true);\
          SELECT {}, {}, {} FROM {table} ORDER BY {};\
          SELECT * FROM {table} WHERE {} != '';\
          INSERT INTO {table} ({}, {}, {}) VALUES ('Gamma', false, 3.5);\
@@ -1122,13 +1889,13 @@ fn run_duckdb_success_case(resource: &str, credential: &str, endpoint: &str, tab
 }
 
 fn run_duckdb_metadata_case(resource: &str, credential: &str, endpoint: &str, table_name: &str) {
-    let table = format!("coda_doc.main.{}", sql_ident(table_name));
+    let table = format!("superhuman_docs_doc.main.{}", sql_ident(table_name));
     let sql = format!(
         "LOAD {};\
-         ATTACH {} AS coda_doc (TYPE coda, TOKEN {}, API_BASE {}, INCLUDE_ROW_METADATA true);\
+         ATTACH {} AS superhuman_docs_doc (TYPE superhuman_docs, TOKEN {}, API_BASE {}, INCLUDE_ROW_METADATA true);\
          SELECT column_name, data_type \
          FROM information_schema.columns \
-         WHERE table_catalog = 'coda_doc' \
+         WHERE table_catalog = 'superhuman_docs_doc' \
            AND table_schema = 'main' \
            AND table_name = {} \
            AND column_name IN ('createdAt', 'updatedAt') \
@@ -1158,11 +1925,14 @@ fn run_duckdb_metadata_case(resource: &str, credential: &str, endpoint: &str, ta
 }
 
 fn run_duckdb(sql: &str) -> String {
-    run_duckdb_command(&mut Command::new("build/release/duckdb"), sql)
+    let mut command = Command::new("build/release/duckdb");
+    command.env("TZ", "UTC");
+    run_duckdb_command(&mut command, sql)
 }
 
 fn run_duckdb_with_env(sql: &str, name: &str, value: &str) -> String {
     let mut command = Command::new("build/release/duckdb");
+    command.env("TZ", "UTC");
     command.env(name, value);
     run_duckdb_command(&mut command, sql)
 }
@@ -1197,7 +1967,7 @@ fn run_duckdb_command_after_setup(setup: &str, sql: &str) -> (bool, String) {
 }
 
 fn extension_path() -> &'static str {
-    let path = "build/release/extension/coda/coda.duckdb_extension";
+    let path = "build/release/extension/superhuman_docs/superhuman_docs.duckdb_extension";
     assert!(
         Path::new(path).exists(),
         "{path} does not exist; run make release first"

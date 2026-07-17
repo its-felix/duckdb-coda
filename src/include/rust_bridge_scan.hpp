@@ -23,10 +23,7 @@ struct RustBridgeScanBindData : FunctionData {
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<RustBridgeScanBindData>();
-		auto table_id = table.Raw().id;
-		auto other_table_id = other.table.Raw().id;
-		return &table_entry == &other.table_entry && table_id.ptr == other_table_id.ptr &&
-		       table_id.len == other_table_id.len;
+		return &table_entry == &other.table_entry && table.Raw().handle == other.table.Raw().handle;
 	}
 
 	TableCatalogEntry &table_entry;

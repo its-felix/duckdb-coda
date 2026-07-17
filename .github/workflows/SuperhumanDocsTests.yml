@@ -1,4 +1,4 @@
-name: Coda Tests
+name: Superhuman Docs Tests
 
 on:
   push:
@@ -10,13 +10,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  coda-tests:
-    name: Mock and real Coda API tests
+  superhuman-docs-tests:
+    name: Mock and real Superhuman Docs API tests
     runs-on: ubuntu-latest
     env:
-      CODA_TEST_API_TOKEN: ${{ secrets.CODA_TEST_API_TOKEN }}
-      CODA_TEST_DOC_ID: ${{ secrets.CODA_TEST_DOC_ID }}
-      CODA_TEST_WIDE_TABLE_ID: ${{ secrets.CODA_TEST_WIDE_TABLE_ID }}
+      SUPERHUMAN_DOCS_TEST_API_TOKEN: ${{ secrets.CODA_TEST_API_TOKEN }}
+      SUPERHUMAN_DOCS_TEST_DOC_ID: ${{ secrets.CODA_TEST_DOC_ID }}
       USE_MERGED_VCPKG_MANIFEST: "1"
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       GEN: ninja
@@ -38,17 +37,16 @@ jobs:
             git -C vcpkg fetch --unshallow --tags
           fi
 
-      - name: Check Coda test secrets
+      - name: Check Superhuman Docs test secrets
         run: |
-          test -n "$CODA_TEST_API_TOKEN"
-          test -n "$CODA_TEST_DOC_ID"
-          test -n "$CODA_TEST_WIDE_TABLE_ID"
+          test -n "$SUPERHUMAN_DOCS_TEST_API_TOKEN"
+          test -n "$SUPERHUMAN_DOCS_TEST_DOC_ID"
 
       - name: Run cargo fmt check
         run: cargo fmt --check
 
-      - name: Run mocked Coda API tests
+      - name: Run mocked Superhuman Docs API tests
         run: cargo test
 
-      - name: Run real Coda API tests
-        run: make test_coda_http_real
+      - name: Run real Superhuman Docs API tests
+        run: make test_superhuman_docs_http_real

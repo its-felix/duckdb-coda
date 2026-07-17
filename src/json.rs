@@ -1,41 +1,50 @@
+use std::ffi::c_void;
+
 use serde_json::Value;
 
 use crate::ffi::*;
+use crate::model::{
+    SuperhumanDocsCell, SuperhumanDocsColumn, SuperhumanDocsPage, SuperhumanDocsRow,
+    SuperhumanDocsRowsResponse, SuperhumanDocsTable,
+};
 
-pub(crate) fn json_value_type(value: &Value) -> u8 {
-    match value {
-        Value::Null => 1,
-        Value::Bool(_) => 2,
-        Value::String(_) => 3,
-        _ => 4,
+pub(crate) fn logical_type(format_type: &str, is_array: bool) -> String {
+    let scalar = match format_type.to_ascii_lowercase().as_str() {
+        "checkbox" => "BOOLEAN",
+        "text" | "email" | "select" => "VARCHAR",
+        "number" | "percent" | "slider" | "scale" => "DECIMAL(38,20)",
+        "date" => "DATE",
+        "datetime" => "TIMESTAMPTZ",
+        "time" => "TIME",
+        "duration" => "INTERVAL",
+        "currency" => "STRUCT(currency VARCHAR, amount DECIMAL(38,20))",
+        "image" => "STRUCT(name VARCHAR, url VARCHAR, height DOUBLE, width DOUBLE, status VARCHAR)",
+        "person" => "STRUCT(name VARCHAR, email VARCHAR)",
+        "link" | "hyperlink" => "STRUCT(name VARCHAR, url VARCHAR)",
+        "lookup" => {
+            "STRUCT(name VARCHAR, url VARCHAR, tableId VARCHAR, tableUrl VARCHAR, rowId VARCHAR)"
+        }
+        _ => "VARCHAR",
+    };
+    if is_array {
+        format!("{scalar}[]")
+    } else {
+        scalar.to_string()
     }
 }
 
-pub(crate) fn json_value_string(value: &Value) -> String {
-    value.to_string()
-}
-
-pub(crate) fn logical_type(format_type: &str, _is_array: bool) -> i32 {
+pub(crate) fn logical_type_alias(format_type: &str) -> String {
     match format_type.to_ascii_lowercase().as_str() {
-        "checkbox" => RUST_EXT_LOGICAL_BOOLEAN,
-        "text" | "email" | "select" => RUST_EXT_LOGICAL_VARCHAR,
-        "number" | "percent" | "slider" | "scale" => RUST_EXT_LOGICAL_DECIMAL,
-        "date" => RUST_EXT_LOGICAL_DATE,
-        "datetime" => RUST_EXT_LOGICAL_TIMESTAMP_TZ,
-        "time" => RUST_EXT_LOGICAL_TIME,
-        "duration" => RUST_EXT_LOGICAL_INTERVAL,
-        "currency" => RUST_EXT_LOGICAL_CURRENCY,
-        "image" => RUST_EXT_LOGICAL_IMAGE,
-        "person" => RUST_EXT_LOGICAL_PERSON,
-        // The public API currently calls this format `link`; accept `hyperlink` as well
-        // because that is the corresponding rich value's terminology.
-        "link" | "hyperlink" => RUST_EXT_LOGICAL_HYPERLINK,
-        "lookup" => RUST_EXT_LOGICAL_LOOKUP,
-        _ => RUST_EXT_LOGICAL_JSON,
+        "checkbox" | "text" | "email" | "select" | "number" | "percent" | "slider" | "scale"
+        | "date" | "datetime" | "time" | "duration" | "currency" | "image" | "person" | "link"
+        | "hyperlink" | "lookup" => String::new(),
+        _ => "JSON".to_string(),
     }
 }
 
-pub(crate) fn table_list_from_json(body: &str) -> Result<RustExtTableList, String> {
+pub(crate) fn table_list_from_json(
+    body: &str,
+) -> Result<SuperhumanDocsPage<SuperhumanDocsTable>, String> {
     let root: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let items = root
         .get("items")
@@ -56,33 +65,33 @@ pub(crate) fn table_list_from_json(body: &str) -> Result<RustExtTableList, Strin
                 | RUST_EXT_TABLE_DELETE
                 | RUST_EXT_TABLE_ROW_ID
         };
-        tables.push(RustExtTable {
-            id: alloc_string(
-                item.get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("missing table id")?,
-            ),
-            name: alloc_string(
-                item.get("name")
-                    .and_then(Value::as_str)
-                    .ok_or("missing table name")?,
-            ),
+        tables.push(SuperhumanDocsTable {
+            id: item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing table id")?
+                .to_string(),
+            name: item
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing table name")?
+                .to_string(),
             capabilities,
         });
     }
-    let (items_ptr, count) = vec_into_raw_parts(tables);
-    Ok(RustExtTableList {
-        items: items_ptr,
-        count,
-        next_page_token: alloc_string(
-            root.get("nextPageToken")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
+    Ok(SuperhumanDocsPage {
+        items: tables,
+        next_page_token: root
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
-pub(crate) fn column_list_from_json(body: &str) -> Result<RustExtColumnList, String> {
+pub(crate) fn column_list_from_json(
+    body: &str,
+) -> Result<SuperhumanDocsPage<SuperhumanDocsColumn>, String> {
     let root: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let items = root
         .get("items")
@@ -106,44 +115,41 @@ pub(crate) fn column_list_from_json(body: &str) -> Result<RustExtColumnList, Str
         let mut capabilities = 0;
         if calculated {
             capabilities |= RUST_EXT_COLUMN_GENERATED;
-        }
-        if !calculated {
+        } else {
             capabilities |= RUST_EXT_COLUMN_EDITABLE;
         }
         if !is_array {
             capabilities |= RUST_EXT_COLUMN_FILTER_EQUALITY;
-        } else {
-            capabilities |= RUST_EXT_COLUMN_ARRAY;
         }
-        columns.push(RustExtColumn {
-            id: alloc_string(
-                item.get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("missing column id")?,
-            ),
-            name: alloc_string(
-                item.get("name")
-                    .and_then(Value::as_str)
-                    .ok_or("missing column name")?,
-            ),
-            type_name: alloc_string(format_type),
+        columns.push(SuperhumanDocsColumn {
+            id: item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing column id")?
+                .to_string(),
+            name: item
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing column name")?
+                .to_string(),
+            format_type: format_type.to_string(),
+            duckdb_type: logical_type(format_type, is_array),
+            duckdb_type_alias: logical_type_alias(format_type),
+            is_array,
             capabilities,
-            logical_type: logical_type(format_type, is_array),
         });
     }
-    let (items_ptr, count) = vec_into_raw_parts(columns);
-    Ok(RustExtColumnList {
-        items: items_ptr,
-        count,
-        next_page_token: alloc_string(
-            root.get("nextPageToken")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
+    Ok(SuperhumanDocsPage {
+        items: columns,
+        next_page_token: root
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
-pub(crate) fn rows_from_json(body: &str) -> Result<CodaRowsResponse, String> {
+pub(crate) fn rows_from_json(body: &str) -> Result<SuperhumanDocsRowsResponse, String> {
     let root: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
     let items = root
         .get("items")
@@ -154,22 +160,28 @@ pub(crate) fn rows_from_json(body: &str) -> Result<CodaRowsResponse, String> {
         let mut cells = Vec::new();
         if let Some(values) = item.get("values").and_then(Value::as_object) {
             for (column_id, value) in values {
-                cells.push(RustExtCell {
-                    column_id: alloc_string(column_id),
-                    value_type: json_value_type(value),
-                    value: alloc_string(&json_value_string(value)),
+                cells.push(SuperhumanDocsCell {
+                    column_id: column_id.clone(),
+                    value: value.clone(),
                 });
             }
         }
-        let (cells_ptr, cell_count) = vec_into_raw_parts(cells);
-        rows.push(RustExtRow {
-            id: alloc_string(
-                item.get("id")
-                    .and_then(Value::as_str)
-                    .ok_or("missing row id")?,
-            ),
-            created_at: alloc_string(item.get("createdAt").and_then(Value::as_str).unwrap_or("")),
-            updated_at: alloc_string(item.get("updatedAt").and_then(Value::as_str).unwrap_or("")),
+        rows.push(SuperhumanDocsRow {
+            id: item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing row id")?
+                .to_string(),
+            created_at: item
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            updated_at: item
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             deleted: item
                 .get("deleted")
                 .and_then(Value::as_bool)
@@ -178,72 +190,25 @@ pub(crate) fn rows_from_json(body: &str) -> Result<CodaRowsResponse, String> {
                     .get("isDeleted")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-            cells: cells_ptr,
-            cell_count,
+            cells,
         });
     }
-    let (rows_ptr, row_count) = vec_into_raw_parts(rows);
-    Ok(CodaRowsResponse {
-        rows: rows_ptr,
-        row_count,
-        next_page_token: alloc_string(
-            root.get("nextPageToken")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
-        next_sync_token: alloc_string(
-            root.get("nextSyncToken")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
+    Ok(SuperhumanDocsRowsResponse {
+        rows,
+        next_page_token: root
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        next_sync_token: root
+            .get("nextSyncToken")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
-pub(crate) fn free_columns(list: RustExtColumnList) {
-    for item in vec_from_raw_parts(list.items, list.count) {
-        item.id.free();
-        item.name.free();
-        item.type_name.free();
-    }
-    list.next_page_token.free();
-}
-
-pub(crate) fn free_rows_partial(rows: *mut RustExtRow, row_count: usize) {
-    for row in vec_from_raw_parts(rows, row_count) {
-        row.id.free();
-        row.created_at.free();
-        row.updated_at.free();
-        for cell in vec_from_raw_parts(row.cells, row.cell_count) {
-            cell.column_id.free();
-            cell.value.free();
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn free_coda_rows_response(response: CodaRowsResponse) {
-    free_rows_partial(response.rows, response.row_count);
-    response.next_page_token.free();
-    response.next_sync_token.free();
-}
-
-pub(crate) fn free_scan_batch(batch: RustExtScanBatch) {
-    free_rows_partial(batch.rows, batch.row_count);
-}
-
-pub(crate) fn free_catalog(catalog: RustExtCatalog) {
-    for table in vec_from_raw_parts(catalog.tables, catalog.table_count) {
-        table.id.free();
-        table.name.free();
-        free_columns(RustExtColumnList {
-            items: table.columns,
-            count: table.column_count,
-            next_page_token: RustExtString::default(),
-        });
-    }
-}
-
-pub(crate) fn prepare_columns(columns: &mut [RustExtColumn]) {
+pub(crate) fn prepare_columns(columns: &mut [SuperhumanDocsColumn]) {
     for idx in 0..columns.len() {
         let original = columns[idx].name.as_str();
         let base = if original.is_empty() {
@@ -255,29 +220,96 @@ pub(crate) fn prepare_columns(columns: &mut [RustExtColumn]) {
         let mut suffix = 1;
         while columns[..idx]
             .iter()
-            .any(|column| column.name.as_str().eq_ignore_ascii_case(&candidate))
+            .any(|column| column.name.eq_ignore_ascii_case(&candidate))
         {
             suffix += 1;
             candidate = format!("{base}_{suffix}");
         }
-        if candidate != original {
-            columns[idx].name.free();
-            columns[idx].name = alloc_string(&candidate);
+        columns[idx].name = candidate;
+    }
+}
+
+pub(crate) fn append_row_metadata(columns: &mut Vec<SuperhumanDocsColumn>) {
+    for name in ["createdAt", "updatedAt"] {
+        columns.push(SuperhumanDocsColumn {
+            id: name.to_string(),
+            name: name.to_string(),
+            format_type: "datetime".to_string(),
+            duckdb_type: logical_type("datetime", false),
+            duckdb_type_alias: String::new(),
+            is_array: false,
+            capabilities: RUST_EXT_COLUMN_GENERATED
+                | RUST_EXT_COLUMN_SYSTEM
+                | RUST_EXT_COLUMN_SORT_ASC,
+        });
+    }
+}
+
+fn ffi_column(column: SuperhumanDocsColumn) -> RustExtColumn {
+    let handle = Box::into_raw(Box::new(column));
+    let column = unsafe { &*handle };
+    RustExtColumn {
+        handle: handle.cast::<c_void>(),
+        name: borrow_string(&column.name),
+        logical_type: borrow_string(&column.duckdb_type),
+        value_type_alias: borrow_string(&column.duckdb_type_alias),
+        capabilities: column.capabilities,
+    }
+}
+
+pub(crate) fn ffi_catalog_table(
+    table: SuperhumanDocsTable,
+    columns: Vec<SuperhumanDocsColumn>,
+) -> RustExtCatalogTable {
+    let handle = Box::into_raw(Box::new(table));
+    let table = unsafe { &*handle };
+    let (columns, column_count) = vec_into_raw_parts(columns.into_iter().map(ffi_column).collect());
+    RustExtCatalogTable {
+        handle: handle.cast::<c_void>(),
+        name: borrow_string(&table.name),
+        capabilities: table.capabilities,
+        columns,
+        column_count,
+    }
+}
+
+pub(crate) fn ffi_scan_batch(rows: Vec<SuperhumanDocsRow>, finished: bool) -> RustExtScanBatch {
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let handle = Box::into_raw(Box::new(row));
+            let row = unsafe { &*handle };
+            RustExtScanRow {
+                handle: handle.cast::<c_void>(),
+                row_id: borrow_string(&row.id),
+            }
+        })
+        .collect();
+    let (rows, row_count) = vec_into_raw_parts(rows);
+    RustExtScanBatch {
+        rows,
+        row_count,
+        finished,
+    }
+}
+
+pub(crate) fn free_scan_batch(batch: RustExtScanBatch) {
+    for row in vec_from_raw_parts(batch.rows, batch.row_count) {
+        if !row.handle.is_null() {
+            drop(unsafe { Box::from_raw(row.handle.cast::<SuperhumanDocsRow>()) });
         }
     }
 }
 
-pub(crate) fn append_row_metadata(columns: &mut Vec<RustExtColumn>) {
-    for name in ["createdAt", "updatedAt"] {
-        let mut capabilities = RUST_EXT_COLUMN_GENERATED | RUST_EXT_COLUMN_SYSTEM;
-        capabilities |= RUST_EXT_COLUMN_SORT_ASC;
-        columns.push(RustExtColumn {
-            id: alloc_string(name),
-            name: alloc_string(name),
-            type_name: alloc_string("timestampTz"),
-            capabilities,
-            logical_type: RUST_EXT_LOGICAL_TIMESTAMP_TZ,
-            ..Default::default()
-        });
+pub(crate) fn free_catalog(catalog: RustExtCatalog) {
+    for table in vec_from_raw_parts(catalog.tables, catalog.table_count) {
+        for column in vec_from_raw_parts(table.columns, table.column_count) {
+            if !column.handle.is_null() {
+                drop(unsafe { Box::from_raw(column.handle.cast::<SuperhumanDocsColumn>()) });
+            }
+        }
+        if !table.handle.is_null() {
+            drop(unsafe { Box::from_raw(table.handle.cast::<SuperhumanDocsTable>()) });
+        }
     }
 }

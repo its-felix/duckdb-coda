@@ -1,60 +1,13 @@
 #pragma once
 
 #include "rust_bridge_extension.h"
+#include "rust_bridge_value.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/planner/expression.hpp"
 
 namespace duckdb {
-
-inline LogicalType RustBridgeDuckDBScalarLogicalType(int32_t rust_bridge_type) {
-	switch (static_cast<RustExtLogicalType>(rust_bridge_type)) {
-	case RUST_EXT_LOGICAL_BOOLEAN:
-		return LogicalType::BOOLEAN;
-	case RUST_EXT_LOGICAL_DECIMAL:
-		return LogicalType::DECIMAL(38, 20);
-	case RUST_EXT_LOGICAL_TIMESTAMP_TZ:
-		return LogicalType::TIMESTAMP_TZ;
-	case RUST_EXT_LOGICAL_DATE:
-		return LogicalType::DATE;
-	case RUST_EXT_LOGICAL_TIME:
-		return LogicalType::TIME;
-	case RUST_EXT_LOGICAL_INTERVAL:
-		return LogicalType::INTERVAL;
-	case RUST_EXT_LOGICAL_CURRENCY:
-		return LogicalType::STRUCT({{"currency", LogicalType::VARCHAR}, {"amount", LogicalType::DECIMAL(38, 20)}});
-	case RUST_EXT_LOGICAL_IMAGE:
-		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR},
-		                            {"url", LogicalType::VARCHAR},
-		                            {"height", LogicalType::DOUBLE},
-		                            {"width", LogicalType::DOUBLE},
-		                            {"status", LogicalType::VARCHAR}});
-	case RUST_EXT_LOGICAL_PERSON:
-		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR}, {"email", LogicalType::VARCHAR}});
-	case RUST_EXT_LOGICAL_HYPERLINK:
-		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR}, {"url", LogicalType::VARCHAR}});
-	case RUST_EXT_LOGICAL_LOOKUP:
-		return LogicalType::STRUCT({{"name", LogicalType::VARCHAR},
-		                            {"url", LogicalType::VARCHAR},
-		                            {"tableId", LogicalType::VARCHAR},
-		                            {"tableUrl", LogicalType::VARCHAR},
-		                            {"rowId", LogicalType::VARCHAR}});
-	case RUST_EXT_LOGICAL_JSON:
-		return LogicalType::JSON();
-	case RUST_EXT_LOGICAL_VARCHAR:
-	default:
-		return LogicalType::VARCHAR;
-	}
-}
-
-inline LogicalType RustBridgeDuckDBLogicalType(int32_t rust_bridge_type, uint32_t capabilities) {
-	auto scalar_type = RustBridgeDuckDBScalarLogicalType(rust_bridge_type);
-	if ((capabilities & RUST_EXT_COLUMN_ARRAY) != 0) {
-		return LogicalType::LIST(std::move(scalar_type));
-	}
-	return scalar_type;
-}
 
 struct RustBridgeColumnInfo {
 	const RustExtColumn *column = nullptr;
@@ -81,60 +34,7 @@ struct RustBridgeTableInfo {
 struct RustBridgeScanRequest {
 	string filter;
 	string order;
-	idx_t limit = 500;
-};
-
-class RustBridgeInputValueBuffer {
-public:
-	RustExtInputValue Convert(const Value &value) {
-		RustExtInputValue result {};
-		if (value.IsNull()) {
-			result.value_type = RUST_EXT_INPUT_NULL;
-			return result;
-		}
-
-		switch (value.type().id()) {
-		case LogicalTypeId::BOOLEAN:
-			result.value_type = RUST_EXT_INPUT_BOOL;
-			result.bool_value = BooleanValue::Get(value);
-			return result;
-		case LogicalTypeId::TINYINT:
-		case LogicalTypeId::SMALLINT:
-		case LogicalTypeId::INTEGER:
-		case LogicalTypeId::BIGINT:
-			result.value_type = RUST_EXT_INPUT_INT;
-			result.int_value = value.GetValue<int64_t>();
-			return result;
-		case LogicalTypeId::UTINYINT:
-		case LogicalTypeId::USMALLINT:
-		case LogicalTypeId::UINTEGER:
-		case LogicalTypeId::UBIGINT:
-			result.value_type = RUST_EXT_INPUT_UINT;
-			result.uint_value = value.GetValue<uint64_t>();
-			return result;
-		case LogicalTypeId::FLOAT:
-		case LogicalTypeId::DOUBLE:
-			result.value_type = RUST_EXT_INPUT_DOUBLE;
-			result.double_value = value.GetValue<double>();
-			return result;
-		default:
-			strings.push_back(value.ToString());
-			result.value_type = RUST_EXT_INPUT_STRING;
-			result.string_value = BorrowString(strings.back());
-			return result;
-		}
-	}
-
-	void Reserve(idx_t count) {
-		strings.reserve(count);
-	}
-
-private:
-	static RustExtString BorrowString(const string &value) {
-		return RustExtString {const_cast<char *>(value.c_str()), value.size()};
-	}
-
-	vector<string> strings;
+	idx_t limit = 0;
 };
 
 class RustBridgeCatalogResponse {
@@ -299,11 +199,11 @@ public:
 	}
 
 	RustExtClientConfig ClientConfig() const {
-		return RustExtClientConfig {config.resource, config.credential, config.endpoint, false};
+		return RustExtClientConfig {config.handle};
 	}
 
-	bool IncludeSystemColumns() const {
-		return config.include_system_columns;
+	RustExtString DatabaseName() const {
+		return config.database_name;
 	}
 
 private:
@@ -319,8 +219,8 @@ class RustBridgeClient {
 public:
 	explicit RustBridgeClient(RustExtClientConfig config);
 
-	RustBridgeCatalogResponse ListTables(bool include_system_columns);
-	RustBridgeScanHandle OpenScan(RustExtString table_id, const RustBridgeScanRequest &request);
+	RustBridgeCatalogResponse ListTables();
+	RustBridgeScanHandle OpenScan(const RustBridgeTableInfo &table, const RustBridgeScanRequest &request);
 	RustBridgeScanBatch NextScanBatch(RustBridgeScanHandle &handle);
 
 	idx_t InsertRows(const RustBridgeTableInfo &table, DataChunk &chunk);

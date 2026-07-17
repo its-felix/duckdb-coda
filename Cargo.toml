@@ -1,10 +1,10 @@
 [package]
-name = "duckdb-coda"
+name = "duckdb-superhuman-docs"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "coda_rust"
+name = "superhuman_docs_rust"
 crate-type = ["staticlib"]
 
 [dependencies]

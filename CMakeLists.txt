@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.5...3.29)
 
-set(TARGET_NAME coda)
+set(TARGET_NAME superhuman_docs)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
-set(RUST_EXTENSION_CRATE_NAME "coda_rust" CACHE STRING
-    "Rust crate/static library name for the extension core")
+set(RUST_EXTENSION_CRATE_NAME "superhuman_docs_rust")
 
 project(${TARGET_NAME})
 

@@ -2,32 +2,19 @@ use std::ffi::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
+pub(crate) const RUST_EXT_INPUT_NULL: u8 = 0;
+
 pub(crate) const RUST_EXT_COLUMN_GENERATED: u32 = 1 << 0;
 pub(crate) const RUST_EXT_COLUMN_SYSTEM: u32 = 1 << 1;
 pub(crate) const RUST_EXT_COLUMN_EDITABLE: u32 = 1 << 2;
 pub(crate) const RUST_EXT_COLUMN_FILTER_EQUALITY: u32 = 1 << 3;
 pub(crate) const RUST_EXT_COLUMN_SORT_ASC: u32 = 1 << 4;
-pub(crate) const RUST_EXT_COLUMN_ARRAY: u32 = 1 << 5;
 
 pub(crate) const RUST_EXT_TABLE_VIEW: u32 = 1 << 0;
 pub(crate) const RUST_EXT_TABLE_INSERT: u32 = 1 << 1;
 pub(crate) const RUST_EXT_TABLE_UPDATE: u32 = 1 << 2;
 pub(crate) const RUST_EXT_TABLE_DELETE: u32 = 1 << 3;
 pub(crate) const RUST_EXT_TABLE_ROW_ID: u32 = 1 << 4;
-
-pub(crate) const RUST_EXT_LOGICAL_VARCHAR: i32 = 0;
-pub(crate) const RUST_EXT_LOGICAL_BOOLEAN: i32 = 1;
-pub(crate) const RUST_EXT_LOGICAL_DECIMAL: i32 = 2;
-pub(crate) const RUST_EXT_LOGICAL_TIMESTAMP_TZ: i32 = 3;
-pub(crate) const RUST_EXT_LOGICAL_DATE: i32 = 4;
-pub(crate) const RUST_EXT_LOGICAL_TIME: i32 = 5;
-pub(crate) const RUST_EXT_LOGICAL_INTERVAL: i32 = 6;
-pub(crate) const RUST_EXT_LOGICAL_CURRENCY: i32 = 7;
-pub(crate) const RUST_EXT_LOGICAL_IMAGE: i32 = 8;
-pub(crate) const RUST_EXT_LOGICAL_PERSON: i32 = 9;
-pub(crate) const RUST_EXT_LOGICAL_HYPERLINK: i32 = 10;
-pub(crate) const RUST_EXT_LOGICAL_LOOKUP: i32 = 11;
-pub(crate) const RUST_EXT_LOGICAL_JSON: i32 = 12;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -63,94 +50,141 @@ pub struct RustExtInputValue {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RustExtWriteColumn {
-    pub(crate) id: RustExtString,
+    pub(crate) handle: *mut c_void,
     pub(crate) capabilities: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct RustExtTable {
-    pub(crate) id: RustExtString,
-    pub(crate) name: RustExtString,
-    pub(crate) capabilities: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RustExtTableList {
-    pub(crate) items: *mut RustExtTable,
-    pub(crate) count: usize,
-    pub(crate) next_page_token: RustExtString,
-}
-
-impl Default for RustExtTableList {
+impl Default for RustExtWriteColumn {
     fn default() -> Self {
         Self {
-            items: ptr::null_mut(),
-            count: 0,
-            next_page_token: RustExtString::default(),
+            handle: ptr::null_mut(),
+            capabilities: 0,
         }
     }
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
+pub struct RustExtNamedValue {
+    pub(crate) name: RustExtString,
+    pub(crate) value: RustExtInputValue,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustExtSecretParameter {
+    pub(crate) name: RustExtString,
+    pub(crate) logical_type: RustExtString,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RustExtSecretRegistration {
+    pub(crate) secret_type: RustExtString,
+    pub(crate) provider: RustExtString,
+    pub(crate) extension: RustExtString,
+    pub(crate) parameters: *const RustExtSecretParameter,
+    pub(crate) parameter_count: usize,
+}
+
+impl Default for RustExtSecretRegistration {
+    fn default() -> Self {
+        Self {
+            secret_type: RustExtString::default(),
+            provider: RustExtString::default(),
+            extension: RustExtString::default(),
+            parameters: ptr::null(),
+            parameter_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RustExtSecretCreateInput {
+    pub(crate) secret_type: RustExtString,
+    pub(crate) provider: RustExtString,
+    pub(crate) name: RustExtString,
+    pub(crate) scope: *const RustExtString,
+    pub(crate) scope_count: usize,
+    pub(crate) options: *const RustExtNamedValue,
+    pub(crate) option_count: usize,
+}
+
+impl Default for RustExtSecretCreateInput {
+    fn default() -> Self {
+        Self {
+            secret_type: RustExtString::default(),
+            provider: RustExtString::default(),
+            name: RustExtString::default(),
+            scope: ptr::null(),
+            scope_count: 0,
+            options: ptr::null(),
+            option_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RustExtSecretCreateResult {
+    pub(crate) scope: *mut RustExtString,
+    pub(crate) scope_count: usize,
+    pub(crate) entries: *mut RustExtNamedValue,
+    pub(crate) entry_count: usize,
+    pub(crate) redact_keys: *mut RustExtString,
+    pub(crate) redact_key_count: usize,
+}
+
+impl Default for RustExtSecretCreateResult {
+    fn default() -> Self {
+        Self {
+            scope: ptr::null_mut(),
+            scope_count: 0,
+            entries: ptr::null_mut(),
+            entry_count: 0,
+            redact_keys: ptr::null_mut(),
+            redact_key_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct RustExtColumn {
-    pub(crate) id: RustExtString,
+    pub(crate) handle: *mut c_void,
     pub(crate) name: RustExtString,
-    pub(crate) type_name: RustExtString,
+    pub(crate) logical_type: RustExtString,
+    pub(crate) value_type_alias: RustExtString,
     pub(crate) capabilities: u32,
-    pub(crate) logical_type: i32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct RustExtColumnList {
-    pub(crate) items: *mut RustExtColumn,
-    pub(crate) count: usize,
-    pub(crate) next_page_token: RustExtString,
-}
-
-impl Default for RustExtColumnList {
+impl Default for RustExtColumn {
     fn default() -> Self {
         Self {
-            items: ptr::null_mut(),
-            count: 0,
-            next_page_token: RustExtString::default(),
+            handle: ptr::null_mut(),
+            name: RustExtString::default(),
+            logical_type: RustExtString::default(),
+            value_type_alias: RustExtString::default(),
+            capabilities: 0,
         }
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct RustExtCell {
-    pub(crate) column_id: RustExtString,
-    pub(crate) value_type: u8,
-    pub(crate) value: RustExtString,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy)]
-pub struct RustExtRow {
-    pub(crate) id: RustExtString,
-    pub(crate) created_at: RustExtString,
-    pub(crate) updated_at: RustExtString,
-    pub(crate) deleted: bool,
-    pub(crate) cells: *mut RustExtCell,
-    pub(crate) cell_count: usize,
+pub struct RustExtScanRow {
+    pub(crate) handle: *mut c_void,
+    pub(crate) row_id: RustExtString,
 }
 
-impl Default for RustExtRow {
+impl Default for RustExtScanRow {
     fn default() -> Self {
         Self {
-            id: RustExtString::default(),
-            created_at: RustExtString::default(),
-            updated_at: RustExtString::default(),
-            deleted: false,
-            cells: ptr::null_mut(),
-            cell_count: 0,
+            handle: ptr::null_mut(),
+            row_id: RustExtString::default(),
         }
     }
 }
@@ -158,7 +192,7 @@ impl Default for RustExtRow {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RustExtScanBatch {
-    pub(crate) rows: *mut RustExtRow,
+    pub(crate) rows: *mut RustExtScanRow,
     pub(crate) row_count: usize,
     pub(crate) finished: bool,
 }
@@ -169,24 +203,6 @@ impl Default for RustExtScanBatch {
             rows: ptr::null_mut(),
             row_count: 0,
             finished: false,
-        }
-    }
-}
-
-pub(crate) struct CodaRowsResponse {
-    pub(crate) rows: *mut RustExtRow,
-    pub(crate) row_count: usize,
-    pub(crate) next_page_token: RustExtString,
-    pub(crate) next_sync_token: RustExtString,
-}
-
-impl Default for CodaRowsResponse {
-    fn default() -> Self {
-        Self {
-            rows: ptr::null_mut(),
-            row_count: 0,
-            next_page_token: RustExtString::default(),
-            next_sync_token: RustExtString::default(),
         }
     }
 }
@@ -202,8 +218,6 @@ pub struct RustExtArrayValue {
 #[derive(Clone, Copy)]
 pub struct RustExtScanValue {
     pub(crate) is_null: bool,
-    pub(crate) value_type: u8,
-    pub(crate) bool_value: bool,
     pub(crate) value_owned: bool,
     pub(crate) value: RustExtString,
     pub(crate) array_values: *mut RustExtArrayValue,
@@ -214,8 +228,6 @@ impl Default for RustExtScanValue {
     fn default() -> Self {
         Self {
             is_null: true,
-            value_type: 0,
-            bool_value: false,
             value_owned: false,
             value: RustExtString::default(),
             array_values: ptr::null_mut(),
@@ -227,7 +239,7 @@ impl Default for RustExtScanValue {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RustExtCatalogTable {
-    pub(crate) id: RustExtString,
+    pub(crate) handle: *mut c_void,
     pub(crate) name: RustExtString,
     pub(crate) capabilities: u32,
     pub(crate) columns: *mut RustExtColumn,
@@ -237,7 +249,7 @@ pub struct RustExtCatalogTable {
 impl Default for RustExtCatalogTable {
     fn default() -> Self {
         Self {
-            id: RustExtString::default(),
+            handle: ptr::null_mut(),
             name: RustExtString::default(),
             capabilities: 0,
             columns: ptr::null_mut(),
@@ -263,23 +275,33 @@ impl Default for RustExtCatalog {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RustExtClientConfig {
-    pub(crate) resource: RustExtString,
-    pub(crate) credential: RustExtString,
-    pub(crate) endpoint: RustExtString,
-    pub(crate) include_system_columns: bool,
+    pub(crate) handle: *mut c_void,
+}
+
+impl Default for RustExtClientConfig {
+    fn default() -> Self {
+        Self {
+            handle: ptr::null_mut(),
+        }
+    }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RustExtAttachConfig {
-    pub(crate) resource: RustExtString,
-    pub(crate) credential: RustExtString,
-    pub(crate) endpoint: RustExtString,
-    pub(crate) primary_secret_scope: RustExtString,
-    pub(crate) fallback_secret_scope: RustExtString,
-    pub(crate) include_system_columns: bool,
+    pub(crate) handle: *mut c_void,
+    pub(crate) database_name: RustExtString,
+}
+
+impl Default for RustExtAttachConfig {
+    fn default() -> Self {
+        Self {
+            handle: ptr::null_mut(),
+            database_name: RustExtString::default(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -295,33 +317,17 @@ impl Default for RustExtScanRequest {
         Self {
             filter: RustExtString::default(),
             order: RustExtString::default(),
-            limit: 500,
+            limit: 0,
         }
     }
-}
-
-pub(crate) struct CodaRowsRequest {
-    pub(crate) page_token: String,
-    pub(crate) query: String,
-    pub(crate) sort_by: String,
-    pub(crate) sync_token: String,
-    pub(crate) limit: u64,
 }
 
 #[repr(C)]
 pub struct RustExtDuckDbHost {
     pub(crate) set_description:
         unsafe extern "C" fn(*mut c_void, *const c_char, *mut RustExtError) -> bool,
-    pub(crate) register_config_secret: unsafe extern "C" fn(
-        *mut c_void,
-        *const c_char,
-        *const c_char,
-        *const c_char,
-        *const c_char,
-        *const c_char,
-        *const c_char,
-        *mut RustExtError,
-    ) -> bool,
+    pub(crate) register_secret:
+        unsafe extern "C" fn(*mut c_void, RustExtSecretRegistration, *mut RustExtError) -> bool,
     pub(crate) register_storage_extension:
         unsafe extern "C" fn(*mut c_void, *const c_char, *mut RustExtError) -> bool,
 }
@@ -360,30 +366,13 @@ impl RustExtDuckDbHost {
         unsafe { (self.set_description)(loader, description, err) }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn register_config_secret(
+    pub(crate) fn register_secret(
         &self,
         loader: *mut c_void,
-        secret_type: *const c_char,
-        provider: *const c_char,
-        extension: *const c_char,
-        default_scope: *const c_char,
-        secret_key: *const c_char,
-        secret_env_key: *const c_char,
+        registration: RustExtSecretRegistration,
         err: *mut RustExtError,
     ) -> bool {
-        unsafe {
-            (self.register_config_secret)(
-                loader,
-                secret_type,
-                provider,
-                extension,
-                default_scope,
-                secret_key,
-                secret_env_key,
-                err,
-            )
-        }
+        unsafe { (self.register_secret)(loader, registration, err) }
     }
 
     pub(crate) fn register_storage_extension(
@@ -430,6 +419,16 @@ pub(crate) fn c_static(value: &'static [u8]) -> *const c_char {
     value.as_ptr().cast()
 }
 
+pub(crate) fn c_static_string(value: &'static [u8]) -> RustExtString {
+    let len = value
+        .len()
+        .saturating_sub(usize::from(value.last() == Some(&0)));
+    RustExtString {
+        ptr: value.as_ptr().cast_mut().cast(),
+        len,
+    }
+}
+
 pub(crate) fn alloc_string(value: &str) -> RustExtString {
     if value.is_empty() {
         return RustExtString::default();
@@ -441,6 +440,13 @@ pub(crate) fn alloc_string(value: &str) -> RustExtString {
     };
     std::mem::forget(bytes);
     result
+}
+
+pub(crate) fn borrow_string(value: &str) -> RustExtString {
+    RustExtString {
+        ptr: value.as_ptr().cast_mut().cast(),
+        len: value.len(),
+    }
 }
 
 impl RustExtString {

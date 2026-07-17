@@ -33,9 +33,9 @@ public:
 		}
 		request.filter = bind_data.pushed_query;
 		request.order = bind_data.pushed_sort_by;
-		request.limit = bind_data.pushed_limit == 0 ? 500 : MinValue<idx_t>(bind_data.pushed_limit, 500);
+		request.limit = bind_data.pushed_limit;
 		remaining_rows = bind_data.pushed_limit;
-		scan = client.OpenScan(table.Raw().id, request);
+		scan = client.OpenScan(table, request);
 	}
 
 	idx_t MaxThreads() const override {
@@ -60,10 +60,6 @@ static unique_ptr<GlobalTableFunctionState> RustBridgeScanInitGlobal(ClientConte
 	}
 	auto &bind_data = input.bind_data->Cast<RustBridgeScanBindData>();
 	return make_uniq<RustBridgeScanGlobalState>(context, bind_data, input);
-}
-
-static RustExtColumn BorrowRustBridgeColumn(const RustBridgeColumnInfo &column) {
-	return column.Raw();
 }
 
 static bool TryExtractRustBridgeEqualityFilter(const LogicalGet &get, const RustBridgeTableInfo &table,
@@ -102,8 +98,7 @@ static bool TryExtractRustBridgeEqualityFilter(const LogicalGet &get, const Rust
 		return false;
 	}
 	auto &column = table.columns[col_idx];
-	auto rust_bridge_column = BorrowRustBridgeColumn(column);
-	if (!rust_ext_scan_can_filter_equality(rust_bridge_column)) {
+	if (!rust_ext_scan_can_filter_equality(column.Raw().handle)) {
 		return false;
 	}
 	auto &constant = right->Cast<BoundConstantExpression>().value;
@@ -116,9 +111,7 @@ static bool TryExtractRustBridgeEqualityFilter(const LogicalGet &get, const Rust
 	RustExtString query_result;
 	RustExtString description_result;
 	RustExtError error;
-	auto &raw_column = column.Raw();
-	if (!rust_ext_build_equality_query(raw_column.id.ptr, raw_column.id.len, raw_column.name.ptr, raw_column.name.len,
-	                                   value, &query_result, &description_result, &error)) {
+	if (!rust_ext_build_equality_query(column.Raw().handle, value, &query_result, &description_result, &error)) {
 		rust_ext_free_error(error);
 		return false;
 	}
@@ -181,9 +174,6 @@ static Value ScanValueToValue(const RustExtScanValue &scan_value, const LogicalT
 		}
 		return Value::LIST(child_type, std::move(values));
 	}
-	if (target_type.id() == LogicalTypeId::BOOLEAN && scan_value.value_type == RUST_EXT_JSON_BOOLEAN) {
-		return Value::BOOLEAN(scan_value.bool_value);
-	}
 	return ScanTextToValue(RustBridgeString(scan_value.value), target_type);
 }
 
@@ -216,7 +206,7 @@ static void RustBridgeScan(ClientContext &, TableFunctionInput &input, DataChunk
 			auto column_index = state.column_indexes[out_col];
 			if (column_index.IsVirtualColumn()) {
 				if (column_index.GetPrimaryIndex() == COLUMN_IDENTIFIER_ROW_ID) {
-					output.data[out_col].SetValue(out_row, Value(RustBridgeString(row.id)));
+					output.data[out_col].SetValue(out_row, Value(RustBridgeString(row.row_id)));
 				} else {
 					output.data[out_col].SetValue(out_row, Value(output.data[out_col].GetType()));
 				}
@@ -227,9 +217,8 @@ static void RustBridgeScan(ClientContext &, TableFunctionInput &input, DataChunk
 				throw InternalException("%s", rust_ext_scan_column_index_out_of_range_message());
 			}
 			auto &column = state.table.columns[col_idx];
-			auto rust_bridge_column = BorrowRustBridgeColumn(column);
 			RustExtScanValue scan_value;
-			if (!rust_ext_scan_value(rust_bridge_column, row, &scan_value)) {
+			if (!rust_ext_scan_value(column.Raw().handle, row.handle, &scan_value)) {
 				output.data[out_col].SetValue(out_row, Value(column.duckdb_type));
 			} else {
 				auto value = ScanValueToValue(scan_value, column.duckdb_type);
@@ -282,9 +271,8 @@ static void RustBridgeScanSetScanOrder(unique_ptr<RowGroupOrderOptions> order_op
 		return;
 	}
 	auto &column = bind_data.table.columns[col_idx];
-	auto rust_bridge_column = BorrowRustBridgeColumn(column);
 	RustExtString sort_by;
-	if (!rust_ext_scan_sort_by(rust_bridge_column, &sort_by)) {
+	if (!rust_ext_scan_sort_by(column.Raw().handle, &sort_by)) {
 		return;
 	}
 	bind_data.pushed_sort_by = TakeRustBridgeString(sort_by);

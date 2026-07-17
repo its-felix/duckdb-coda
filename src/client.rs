@@ -2,8 +2,12 @@ use superhuman_docs::operations;
 
 use crate::ffi::*;
 use crate::json::{
-    append_row_metadata, column_list_from_json, prepare_columns, rows_from_json,
-    table_list_from_json,
+    append_row_metadata, column_list_from_json, ffi_catalog_table, ffi_scan_batch, prepare_columns,
+    rows_from_json, table_list_from_json,
+};
+use crate::model::{
+    SuperhumanDocsClientConfig, SuperhumanDocsColumn, SuperhumanDocsRowsRequest,
+    SuperhumanDocsRowsResponse, SuperhumanDocsTable,
 };
 use crate::sdk::{non_empty_string, SdkClient};
 
@@ -12,7 +16,7 @@ fn load_columns(
     doc_id: &str,
     table_id: &str,
     include_system_columns: bool,
-) -> Result<RustExtColumnList, String> {
+) -> Result<Vec<SuperhumanDocsColumn>, String> {
     let mut all = Vec::new();
     let mut page_token = String::new();
     loop {
@@ -29,10 +33,8 @@ fn load_columns(
                 })
         })?;
         let page = column_list_from_json(&body)?;
-        let items = vec_from_raw_parts(page.items, page.count);
-        all.extend(items);
-        page_token = page.next_page_token.as_str().to_string();
-        page.next_page_token.free();
+        all.extend(page.items);
+        page_token = page.next_page_token;
         if page_token.is_empty() {
             break;
         }
@@ -41,17 +43,12 @@ fn load_columns(
         append_row_metadata(&mut all);
     }
     prepare_columns(&mut all);
-    let (items, count) = vec_into_raw_parts(all);
-    Ok(RustExtColumnList {
-        items,
-        count,
-        next_page_token: RustExtString::default(),
-    })
+    Ok(all)
 }
 
-pub(crate) fn load_catalog(config: RustExtClientConfig) -> Result<RustExtCatalog, String> {
+pub(crate) fn load_catalog(config: &SuperhumanDocsClientConfig) -> Result<RustExtCatalog, String> {
     let sdk = SdkClient::new(config)?;
-    let doc_id = config.resource.as_str().to_string();
+    let doc_id = config.resource.clone();
     let mut catalog_tables = Vec::new();
     let mut page_token = String::new();
     loop {
@@ -65,31 +62,21 @@ pub(crate) fn load_catalog(config: RustExtClientConfig) -> Result<RustExtCatalog
             })
         })?;
         let page = table_list_from_json(&body)?;
-        let tables = vec_from_raw_parts(page.items, page.count);
-        for table in tables {
-            let columns = load_columns(
-                &sdk,
-                &doc_id,
-                table.id.as_str(),
-                config.include_system_columns,
-            )?;
-            catalog_tables.push(RustExtCatalogTable {
-                id: alloc_string(table.id.as_str()),
-                name: alloc_string(table.name.as_str()),
-                capabilities: table.capabilities,
-                columns: columns.items,
-                column_count: columns.count,
-            });
-            table.id.free();
-            table.name.free();
+        for table in page.items {
+            let columns = load_columns(&sdk, &doc_id, &table.id, config.include_system_columns)?;
+            catalog_tables.push((table, columns));
         }
-        page_token = page.next_page_token.as_str().to_string();
-        page.next_page_token.free();
+        page_token = page.next_page_token;
         if page_token.is_empty() {
             break;
         }
     }
-    let (tables, table_count) = vec_into_raw_parts(catalog_tables);
+    let (tables, table_count) = vec_into_raw_parts(
+        catalog_tables
+            .into_iter()
+            .map(|(table, columns)| ffi_catalog_table(table, columns))
+            .collect(),
+    );
     Ok(RustExtCatalog {
         tables,
         table_count,
@@ -100,8 +87,8 @@ fn list_rows(
     sdk: &SdkClient,
     doc_id: &str,
     table_id: &str,
-    request: CodaRowsRequest,
-) -> Result<CodaRowsResponse, String> {
+    request: SuperhumanDocsRowsRequest,
+) -> Result<SuperhumanDocsRowsResponse, String> {
     let sort_by = rows_sort_by(&request.sort_by)?;
     let body = sdk.execute(|client| {
         client.tables().rows().list(operations::ListRowsInput {
@@ -145,14 +132,14 @@ pub(crate) struct ScanHandle {
 
 impl ScanHandle {
     pub(crate) fn new(
-        config: RustExtClientConfig,
-        table_id: RustExtString,
+        config: &SuperhumanDocsClientConfig,
+        table: &SuperhumanDocsTable,
         request: RustExtScanRequest,
     ) -> Result<Self, String> {
         Ok(Self {
             sdk: SdkClient::new(config)?,
-            doc_id: config.resource.as_str().to_string(),
-            table_id: table_id.as_str().to_string(),
+            doc_id: config.resource.clone(),
+            table_id: table.id.clone(),
             query: request.filter.as_str().to_string(),
             sort_by: request.order.as_str().to_string(),
             limit: if request.limit == 0 {
@@ -167,7 +154,7 @@ impl ScanHandle {
         })
     }
 
-    fn request(&mut self) -> CodaRowsRequest {
+    fn request(&mut self) -> SuperhumanDocsRowsRequest {
         let sync_token = if self.next_page_token.is_empty()
             && !self.next_sync_token.is_empty()
             && !self.sync_check_done
@@ -177,7 +164,7 @@ impl ScanHandle {
         } else {
             String::new()
         };
-        CodaRowsRequest {
+        SuperhumanDocsRowsRequest {
             page_token: self.next_page_token.clone(),
             query: self.query.clone(),
             sort_by: self.sort_by.clone(),
@@ -190,43 +177,23 @@ impl ScanHandle {
         while !self.finished {
             let request = self.request();
             let response = list_rows(&self.sdk, &self.doc_id, &self.table_id, request)?;
-            self.next_page_token = response.next_page_token.as_str().to_string();
-            self.next_sync_token = response.next_sync_token.as_str().to_string();
-            response.next_page_token.free();
-            response.next_sync_token.free();
+            self.next_page_token = response.next_page_token;
+            self.next_sync_token = response.next_sync_token;
             if self.next_page_token.is_empty()
                 && (self.next_sync_token.is_empty() || self.sync_check_done)
             {
                 self.finished = true;
             }
 
-            let rows = vec_from_raw_parts(response.rows, response.row_count);
-            let mut visible_rows = Vec::with_capacity(rows.len());
-            for row in rows {
-                if row.deleted {
-                    for cell in vec_from_raw_parts(row.cells, row.cell_count) {
-                        cell.column_id.free();
-                        cell.value.free();
-                    }
-                    row.id.free();
-                    row.created_at.free();
-                    row.updated_at.free();
-                } else {
-                    visible_rows.push(row);
-                }
-            }
-            let (rows, row_count) = vec_into_raw_parts(visible_rows);
-            if row_count > 0 || self.finished {
-                return Ok(RustExtScanBatch {
-                    rows,
-                    row_count,
-                    finished: self.finished,
-                });
+            let visible_rows = response
+                .rows
+                .into_iter()
+                .filter(|row| !row.deleted)
+                .collect::<Vec<_>>();
+            if !visible_rows.is_empty() || self.finished {
+                return Ok(ffi_scan_batch(visible_rows, self.finished));
             }
         }
-        Ok(RustExtScanBatch {
-            finished: true,
-            ..Default::default()
-        })
+        Ok(ffi_scan_batch(Vec::new(), true))
     }
 }
