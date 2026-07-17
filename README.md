@@ -140,4 +140,4 @@ column so the JSON fallback is covered. It must also contain a populated array-v
 - Explicit DuckDB transactions are not supported for attached Coda databases. Use autocommit statements so the extension
   does not imply rollback semantics that Coda cannot provide.
 - Unsupported Coda values use DuckDB's `JSON` type; all array-valued columns preserve their mapped inner type.
-- API request construction uses the `superhuman-docs` Rust SDK at tag `v0.2.0`.
+- API routing and request construction use the `superhuman-docs` Rust SDK resource clients at tag `v0.3.0`; the extension supplies a custom transport for authentication, connection reuse, and raw Coda value compatibility.

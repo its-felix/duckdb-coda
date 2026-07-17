@@ -4,7 +4,7 @@ use crate::json::{
     column_list_from_json, free_coda_rows_response, free_columns, logical_type, rows_from_json,
 };
 use crate::mutation::{build_equality_query, insert_body};
-use crate::sdk::{send_request, validate_token_at};
+use crate::sdk::{validate_token_at, SdkClient};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{Read, Write};
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use superhuman_docs::{operations, Request, DEFAULT_BASE_URL};
+use superhuman_docs::{operations, Client, Error, DEFAULT_BASE_URL};
 
 #[test]
 fn parse_columns_and_rows() {
@@ -138,7 +138,10 @@ fn token_validation_uses_whoami_status() {
 
     let server = MockCodaServer::start_with_whoami_status("401 Unauthorized");
     let error = validate_token_at(&server.base_url(), "bad-token").unwrap_err();
-    assert_eq!(error, "Whoami returned HTTP 401, expected 200");
+    assert_eq!(
+        error,
+        "Whoami returned HTTP 401, expected 200: not valid JSON"
+    );
 }
 
 #[test]
@@ -735,15 +738,13 @@ struct PageCleanup {
 
 impl Drop for PageCleanup {
     fn drop(&mut self) {
-        let request = operations::build_delete_page(
-            &self.endpoint,
-            operations::DeletePageInput {
-                doc_id: self.resource.clone(),
-                page_id_or_name: self.page_id.clone(),
-            },
-        );
-        if let Ok(request) = request {
-            let _ = api_json(&self.endpoint, &self.credential, request);
+        if let Ok(sdk) = SdkClient::at(&self.endpoint, &self.credential) {
+            let _ = sdk.execute(|client| {
+                client.docs().pages().delete(operations::DeletePageInput {
+                    doc_id: self.resource.clone(),
+                    page_id_or_name: self.page_id.clone(),
+                })
+            });
         }
     }
 }
@@ -752,18 +753,14 @@ fn required_env(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("{name} must be set in the environment"))
 }
 
-fn api_config(credential: &str) -> RustExtClientConfig {
-    RustExtClientConfig {
-        credential: alloc_string(credential),
-        ..Default::default()
-    }
+fn api_json<T>(
+    sdk: &SdkClient,
+    operation: impl FnOnce(&Client) -> Result<T, Error>,
+) -> Result<Value, String> {
+    json_body(sdk.execute(operation)?)
 }
 
-fn api_json(_api_base: &str, credential: &str, request: Request) -> Result<Value, String> {
-    let config = api_config(credential);
-    let body = send_request(config, request);
-    config.credential.free();
-    let body = body?;
+fn json_body(body: String) -> Result<Value, String> {
     if body.trim().is_empty() {
         Ok(json!({}))
     } else {
@@ -771,19 +768,14 @@ fn api_json(_api_base: &str, credential: &str, request: Request) -> Result<Value
     }
 }
 
-fn paged_items(
-    endpoint: &str,
-    credential: &str,
-    mut build: impl FnMut(Option<String>) -> Result<Request, superhuman_docs::Error>,
+fn paged_items<T>(
+    sdk: &SdkClient,
+    mut operation: impl FnMut(&Client, Option<String>) -> Result<T, Error>,
 ) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     let mut page_token = None;
     loop {
-        let root = api_json(
-            endpoint,
-            credential,
-            build(page_token.take()).map_err(|e| e.to_string())?,
-        )?;
+        let root = api_json(sdk, |client| operation(client, page_token.take()))?;
         if let Some(items) = root.get("items").and_then(Value::as_array) {
             out.extend(items.iter().cloned());
         }
@@ -799,15 +791,20 @@ fn paged_items(
 }
 
 fn first_editable_doc(endpoint: &str, credential: &str) -> Result<String, String> {
-    let docs = paged_items(endpoint, credential, |page_token| {
-        operations::build_list_docs(
-            endpoint,
-            operations::ListDocsInput {
-                limit: Some(100),
-                page_token,
-                ..Default::default()
-            },
-        )
+    let sdk = SdkClient::at(endpoint, credential)?;
+    let docs = paged_items(&sdk, |client, page_token| {
+        client.docs().list(operations::ListDocsInput {
+            limit: Some(100),
+            page_token,
+            is_owner: None,
+            is_published: None,
+            query: None,
+            source_doc: None,
+            is_starred: None,
+            in_gallery: None,
+            workspace_id: None,
+            folder_id: None,
+        })
     })?;
     docs.into_iter()
         .find(|doc| doc.get("canEdit").and_then(Value::as_bool).unwrap_or(false))
@@ -848,15 +845,21 @@ fn create_test_page(
         },
     })
     .to_string();
-    let request = operations::build_create_page(
-        endpoint,
-        operations::CreatePageInput {
+    let sdk = SdkClient::at(endpoint, credential)?;
+    let body = sdk.execute_with_body(payload, |client| {
+        client.docs().pages().create(operations::CreatePageInput {
             doc_id: resource.to_string(),
-            payload,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    api_json(endpoint, credential, request)
+            payload: operations::PageCreate {
+                name: Some(page_name.to_string()),
+                subtitle: None,
+                icon_name: None,
+                image_url: None,
+                parent_page_id: None,
+                page_content: None,
+            },
+        })
+    })?;
+    json_body(body)
 }
 
 fn wait_for_page_table(
@@ -866,17 +869,16 @@ fn wait_for_page_table(
     page_id: &str,
     wanted_table_name: &str,
 ) -> Result<Value, String> {
+    let sdk = SdkClient::at(endpoint, credential)?;
     for _ in 0..40 {
-        let tables = paged_items(endpoint, credential, |page_token| {
-            operations::build_list_tables(
-                endpoint,
-                operations::ListTablesInput {
-                    doc_id: resource.to_string(),
-                    limit: Some(100),
-                    page_token,
-                    ..Default::default()
-                },
-            )
+        let tables = paged_items(&sdk, |client, page_token| {
+            client.tables().list(operations::ListTablesInput {
+                doc_id: resource.to_string(),
+                limit: Some(100),
+                page_token,
+                sort_by: None,
+                table_types: None,
+            })
         })?;
         for table in &tables {
             let parent_id = table
@@ -908,17 +910,18 @@ fn assert_required_columns(
     resource: &str,
     table_id: &str,
 ) -> Result<(), String> {
-    let columns = paged_items(endpoint, credential, |page_token| {
-        operations::build_list_columns(
-            endpoint,
-            operations::ListColumnsInput {
+    let sdk = SdkClient::at(endpoint, credential)?;
+    let columns = paged_items(&sdk, |client, page_token| {
+        client
+            .tables()
+            .columns()
+            .list(operations::ListColumnsInput {
                 doc_id: resource.to_string(),
                 table_id_or_name: table_id.to_string(),
                 limit: Some(100),
                 page_token,
                 visible_only: Some(false),
-            },
-        )
+            })
     })?;
     for required in ["Name", "Done", "Amount"] {
         let found = columns
@@ -937,17 +940,18 @@ fn assert_wide_column_formats(
     resource: &str,
     table_id: &str,
 ) -> Result<(), String> {
-    let columns = paged_items(endpoint, credential, |page_token| {
-        operations::build_list_columns(
-            endpoint,
-            operations::ListColumnsInput {
+    let sdk = SdkClient::at(endpoint, credential)?;
+    let columns = paged_items(&sdk, |client, page_token| {
+        client
+            .tables()
+            .columns()
+            .list(operations::ListColumnsInput {
                 doc_id: resource.to_string(),
                 table_id_or_name: table_id.to_string(),
                 limit: Some(100),
                 page_token,
                 visible_only: Some(false),
-            },
-        )
+            })
     })?;
     for (name, format_type, expected_array) in [
         ("Checkbox", "checkbox", false),
@@ -995,16 +999,15 @@ fn resolve_table_identity(
     resource: &str,
     configured_table: &str,
 ) -> Result<(String, String), String> {
-    let tables = paged_items(endpoint, credential, |page_token| {
-        operations::build_list_tables(
-            endpoint,
-            operations::ListTablesInput {
-                doc_id: resource.to_string(),
-                limit: Some(100),
-                page_token,
-                ..Default::default()
-            },
-        )
+    let sdk = SdkClient::at(endpoint, credential)?;
+    let tables = paged_items(&sdk, |client, page_token| {
+        client.tables().list(operations::ListTablesInput {
+            doc_id: resource.to_string(),
+            limit: Some(100),
+            page_token,
+            sort_by: None,
+            table_types: None,
+        })
     })?;
     tables
         .iter()

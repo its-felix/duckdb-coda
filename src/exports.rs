@@ -354,7 +354,7 @@ pub extern "C" fn rust_ext_scan_open(
     err: *mut RustExtError,
 ) -> bool {
     ffi_bool(err, "failed to open Coda scan", || {
-        let handle = Box::new(ScanHandle::new(config, table_id, request));
+        let handle = Box::new(ScanHandle::new(config, table_id, request)?);
         write_out(out, Box::into_raw(handle).cast::<c_void>())
     })
 }

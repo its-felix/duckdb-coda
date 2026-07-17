@@ -1,9 +1,8 @@
 use serde_json::{json, Value};
-
 use superhuman_docs::operations;
 
 use crate::ffi::*;
-use crate::sdk::{endpoint, send_request};
+use crate::sdk::SdkClient;
 
 pub(crate) fn input_value_json(value: RustExtInputValue) -> Value {
     match value.value_type {
@@ -69,11 +68,6 @@ pub(crate) fn update_body(
     Ok(json!({ "row": write_cells(columns, values) }).to_string())
 }
 
-pub(crate) fn delete_body(row_ids: &[RustExtString]) -> String {
-    let ids: Vec<String> = row_ids.iter().map(|id| id.as_str().to_string()).collect();
-    json!({ "rowIds": ids }).to_string()
-}
-
 pub(crate) fn insert_rows(
     config: RustExtClientConfig,
     table_id: RustExtString,
@@ -83,6 +77,7 @@ pub(crate) fn insert_rows(
     value_column_count: usize,
     table_capabilities: u32,
 ) -> Result<usize, String> {
+    let sdk = SdkClient::new(config)?;
     let body = insert_body(
         columns,
         values,
@@ -90,17 +85,20 @@ pub(crate) fn insert_rows(
         value_column_count,
         table_capabilities,
     )?;
-    let request = operations::build_upsert_rows(
-        &endpoint(config),
-        operations::UpsertRowsInput {
-            doc_id: config.resource.as_str().to_string(),
-            table_id_or_name: table_id.as_str().to_string(),
-            disable_parsing: Some(false),
-            payload: body,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    send_request(config, request)?;
+    sdk.execute_with_body(body, |client| {
+        client
+            .tables()
+            .rows()
+            .upsert_rows(operations::UpsertRowsInput {
+                doc_id: config.resource.as_str().to_string(),
+                table_id_or_name: table_id.as_str().to_string(),
+                disable_parsing: Some(false),
+                payload: operations::RowsUpsert {
+                    rows: Vec::new(),
+                    key_columns: None,
+                },
+            })
+    })?;
     Ok(row_count)
 }
 
@@ -118,6 +116,7 @@ pub(crate) fn update_rows(
     if values.len() != row_ids.len() * columns.len() {
         return Err("update value count mismatch".to_string());
     }
+    let sdk = SdkClient::new(config)?;
     for (row_index, row_id) in row_ids.iter().enumerate() {
         let start = row_index * columns.len();
         let body = update_body(
@@ -125,18 +124,17 @@ pub(crate) fn update_rows(
             &values[start..start + columns.len()],
             table_capabilities,
         )?;
-        let request = operations::build_update_row(
-            &endpoint(config),
-            operations::UpdateRowInput {
+        sdk.execute_with_body(body, |client| {
+            client.tables().rows().update(operations::UpdateRowInput {
                 doc_id: config.resource.as_str().to_string(),
                 table_id_or_name: table_id.as_str().to_string(),
                 row_id_or_name: row_id.as_str().to_string(),
                 disable_parsing: Some(false),
-                payload: body,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        send_request(config, request)?;
+                payload: operations::RowUpdate {
+                    row: operations::RowEdit { cells: Vec::new() },
+                },
+            })
+        })?;
     }
     Ok(row_ids.len())
 }
@@ -149,16 +147,22 @@ pub(crate) fn delete_rows(
     if row_ids.is_empty() {
         return Ok(0);
     }
-    let request = operations::build_delete_rows(
-        &endpoint(config),
-        operations::DeleteRowsInput {
-            doc_id: config.resource.as_str().to_string(),
-            table_id_or_name: table_id.as_str().to_string(),
-            payload: delete_body(row_ids),
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    send_request(config, request)?;
+    let sdk = SdkClient::new(config)?;
+    sdk.execute(|client| {
+        client
+            .tables()
+            .rows()
+            .delete_rows(operations::DeleteRowsInput {
+                doc_id: config.resource.as_str().to_string(),
+                table_id_or_name: table_id.as_str().to_string(),
+                payload: operations::RowsDelete {
+                    row_ids: row_ids
+                        .iter()
+                        .map(|row_id| row_id.as_str().to_string())
+                        .collect(),
+                },
+            })
+    })?;
     Ok(row_ids.len())
 }
 

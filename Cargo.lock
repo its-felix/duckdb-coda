@@ -298,6 +298,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -359,8 +360,12 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "superhuman-docs"
-version = "0.2.0"
-source = "git+https://github.com/its-felix/superhuman-docs-sdk.git?tag=v0.2.0#47d37db36a0972992c3d45bdccfb9db4454e12a5"
+version = "0.3.0"
+source = "git+https://github.com/its-felix/superhuman-docs-sdk.git?tag=v0.3.0#883a2938c1e226ea057dcc98484e190dc237cfe1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "syn"

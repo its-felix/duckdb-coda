@@ -1,4 +1,3 @@
-use std::ffi::c_char;
 use superhuman_docs::operations;
 
 use crate::ffi::*;
@@ -6,27 +5,29 @@ use crate::json::{
     append_row_metadata, column_list_from_json, prepare_columns, rows_from_json,
     table_list_from_json,
 };
-use crate::sdk::{endpoint, non_empty_string, send_request};
+use crate::sdk::{non_empty_string, SdkClient};
 
-pub(crate) fn load_columns(
-    config: RustExtClientConfig,
-    table_id: RustExtString,
+fn load_columns(
+    sdk: &SdkClient,
+    doc_id: &str,
+    table_id: &str,
+    include_system_columns: bool,
 ) -> Result<RustExtColumnList, String> {
     let mut all = Vec::new();
     let mut page_token = String::new();
     loop {
-        let request = operations::build_list_columns(
-            &endpoint(config),
-            operations::ListColumnsInput {
-                doc_id: config.resource.as_str().to_string(),
-                table_id_or_name: table_id.as_str().to_string(),
-                limit: Some(100),
-                page_token: (!page_token.is_empty()).then(|| page_token.clone()),
-                visible_only: Some(false),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        let body = send_request(config, request)?;
+        let body = sdk.execute(|client| {
+            client
+                .tables()
+                .columns()
+                .list(operations::ListColumnsInput {
+                    doc_id: doc_id.to_string(),
+                    table_id_or_name: table_id.to_string(),
+                    limit: Some(100),
+                    page_token: (!page_token.is_empty()).then(|| page_token.clone()),
+                    visible_only: Some(false),
+                })
+        })?;
         let page = column_list_from_json(&body)?;
         let items = vec_from_raw_parts(page.items, page.count);
         all.extend(items);
@@ -36,7 +37,7 @@ pub(crate) fn load_columns(
             break;
         }
     }
-    if config.include_system_columns {
+    if include_system_columns {
         append_row_metadata(&mut all);
     }
     prepare_columns(&mut all);
@@ -49,24 +50,29 @@ pub(crate) fn load_columns(
 }
 
 pub(crate) fn load_catalog(config: RustExtClientConfig) -> Result<RustExtCatalog, String> {
+    let sdk = SdkClient::new(config)?;
+    let doc_id = config.resource.as_str().to_string();
     let mut catalog_tables = Vec::new();
     let mut page_token = String::new();
     loop {
-        let request = operations::build_list_tables(
-            &endpoint(config),
-            operations::ListTablesInput {
-                doc_id: config.resource.as_str().to_string(),
+        let body = sdk.execute(|client| {
+            client.tables().list(operations::ListTablesInput {
+                doc_id: doc_id.clone(),
                 limit: Some(100),
                 page_token: (!page_token.is_empty()).then(|| page_token.clone()),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        let body = send_request(config, request)?;
+                sort_by: None,
+                table_types: None,
+            })
+        })?;
         let page = table_list_from_json(&body)?;
         let tables = vec_from_raw_parts(page.items, page.count);
         for table in tables {
-            let columns = load_columns(config, table.id)?;
+            let columns = load_columns(
+                &sdk,
+                &doc_id,
+                table.id.as_str(),
+                config.include_system_columns,
+            )?;
             catalog_tables.push(RustExtCatalogTable {
                 id: alloc_string(table.id.as_str()),
                 name: alloc_string(table.name.as_str()),
@@ -90,33 +96,43 @@ pub(crate) fn load_catalog(config: RustExtClientConfig) -> Result<RustExtCatalog
     })
 }
 
-pub(crate) fn list_rows(
-    config: RustExtClientConfig,
-    table_id: RustExtString,
+fn list_rows(
+    sdk: &SdkClient,
+    doc_id: &str,
+    table_id: &str,
     request: CodaRowsRequest,
 ) -> Result<CodaRowsResponse, String> {
-    let sdk_request = operations::build_list_rows(
-        &endpoint(config),
-        operations::ListRowsInput {
-            doc_id: config.resource.as_str().to_string(),
-            table_id_or_name: table_id.as_str().to_string(),
+    let sort_by = rows_sort_by(&request.sort_by)?;
+    let body = sdk.execute(|client| {
+        client.tables().rows().list(operations::ListRowsInput {
+            doc_id: doc_id.to_string(),
+            table_id_or_name: table_id.to_string(),
             query: non_empty_string(&request.query),
-            sort_by: non_empty_string(&request.sort_by),
+            sort_by,
             use_column_names: Some(false),
-            value_format: Some("rich".to_string()),
+            value_format: Some(operations::ValueFormat::Rich),
             visible_only: Some(false),
-            limit: Some(request.limit as i64),
+            limit: Some(request.limit as i32),
             page_token: non_empty_string(&request.page_token),
             sync_token: non_empty_string(&request.sync_token),
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    let body = send_request(config, sdk_request)?;
+        })
+    })?;
     rows_from_json(&body)
 }
 
+fn rows_sort_by(value: &str) -> Result<Option<operations::RowsSortBy>, String> {
+    match value {
+        "" => Ok(None),
+        "createdAt" => Ok(Some(operations::RowsSortBy::CreatedAt)),
+        "natural" => Ok(Some(operations::RowsSortBy::Natural)),
+        "updatedAt" => Ok(Some(operations::RowsSortBy::UpdatedAt)),
+        _ => Err(format!("unsupported row sort order: {value}")),
+    }
+}
+
 pub(crate) struct ScanHandle {
-    config: RustExtClientConfig,
+    sdk: SdkClient,
+    doc_id: String,
     table_id: String,
     query: String,
     sort_by: String,
@@ -132,9 +148,10 @@ impl ScanHandle {
         config: RustExtClientConfig,
         table_id: RustExtString,
         request: RustExtScanRequest,
-    ) -> Self {
-        Self {
-            config,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            sdk: SdkClient::new(config)?,
+            doc_id: config.resource.as_str().to_string(),
             table_id: table_id.as_str().to_string(),
             query: request.filter.as_str().to_string(),
             sort_by: request.order.as_str().to_string(),
@@ -147,14 +164,7 @@ impl ScanHandle {
             next_sync_token: String::new(),
             sync_check_done: false,
             finished: false,
-        }
-    }
-
-    fn table_id_string(&self) -> RustExtString {
-        RustExtString {
-            ptr: self.table_id.as_ptr() as *mut c_char,
-            len: self.table_id.len(),
-        }
+        })
     }
 
     fn request(&mut self) -> CodaRowsRequest {
@@ -178,7 +188,8 @@ impl ScanHandle {
 
     pub(crate) fn next_batch(&mut self) -> Result<RustExtScanBatch, String> {
         while !self.finished {
-            let response = list_rows(self.config, self.table_id_string(), self.request())?;
+            let request = self.request();
+            let response = list_rows(&self.sdk, &self.doc_id, &self.table_id, request)?;
             self.next_page_token = response.next_page_token.as_str().to_string();
             self.next_sync_token = response.next_sync_token.as_str().to_string();
             response.next_page_token.free();
