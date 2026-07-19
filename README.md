@@ -109,7 +109,7 @@ The extension requests rich row values and maps scalar Superhuman Docs column fo
 | --- | --- |
 | `checkbox` | `BOOLEAN` |
 | `text`, `email`, `select` | `VARCHAR` |
-| `number`, `percent`, `slider`, `scale` | `DECIMAL(38, 20)` |
+| `number`, `percent`, `slider` (including progress display), `scale` | `DECIMAL(38, 20)` |
 | `date` | `DATE` |
 | `dateTime` | `TIMESTAMP WITH TIME ZONE` |
 | `time` | `TIME` |
@@ -123,6 +123,25 @@ The extension requests rich row values and maps scalar Superhuman Docs column fo
 Array-valued columns use the same mapping for their elements and expose a DuckDB array type; for example, an array
 `duration` column becomes `INTERVAL[]`. A scalar `select` exposes its selected value as `VARCHAR`. Unsupported scalar
 formats map to `JSON`, and arrays of unsupported values become `JSON[]`.
+
+The API accepts only primitive cell values (or arrays of primitives) when rows are inserted or updated. The extension
+therefore converts DuckDB's rich structs back to the primitive understood by the destination column:
+
+Numeric formats (`number`, `percent`, `slider`, progress-style sliders, and `scale`) are sent as JSON numbers while
+preserving DuckDB's exact decimal representation. Quoted decimal strings are not used because the UI treats them as
+invalid values even when their text can be rendered as a number.
+
+| DuckDB rich type | Value sent when writing |
+| --- | --- |
+| `currency` | `amount` (the destination column determines the currency format) |
+| `image` | `url` |
+| `person` | `email`, falling back to `name` |
+| `link`, `hyperlink` | `url` |
+| `lookup` | `rowId`, falling back to `name` |
+
+Array-valued columns are sent as JSON arrays after applying the same conversion to every element. The JSON-LD objects
+returned by `valueFormat=rich` are read representations; sending those objects directly would create invalid cell
+values.
 
 ## Repository Layout
 

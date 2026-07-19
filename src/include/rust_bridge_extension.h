@@ -23,7 +23,8 @@ typedef enum {
 	RUST_EXT_INPUT_INT = 2,
 	RUST_EXT_INPUT_UINT = 3,
 	RUST_EXT_INPUT_DOUBLE = 4,
-	RUST_EXT_INPUT_STRING = 5
+	RUST_EXT_INPUT_STRING = 5,
+	RUST_EXT_INPUT_JSON = 6
 } RustExtInputValueType;
 
 typedef enum {

@@ -136,6 +136,117 @@ fn mutation_bodies_match_previous_shape() {
 }
 
 #[test]
+fn mutation_bodies_reduce_rich_duckdb_types_to_api_primitives() {
+    let specs = [
+        ("currency", false, r#"{"currency":"EUR","amount":10.0}"#),
+        (
+            "image",
+            false,
+            r#"{"name":"photo.png","url":"https://example.com/photo.png","height":480,"width":640,"status":"live"}"#,
+        ),
+        (
+            "person",
+            false,
+            r#"{"name":"Ada Lovelace","email":"ada@example.com"}"#,
+        ),
+        (
+            "hyperlink",
+            false,
+            r#"{"name":"Example","url":"https://example.com"}"#,
+        ),
+        (
+            "lookup",
+            false,
+            r#"{"name":"Referenced row","url":"https://coda.io/row","tableId":"tbl-related","tableUrl":"https://coda.io/table","rowId":"row-related"}"#,
+        ),
+        ("select", true, r#"["One","Two"]"#),
+        (
+            "currency",
+            true,
+            r#"[{"currency":"USD","amount":12.34},{"currency":"EUR","amount":56.78}]"#,
+        ),
+    ];
+    let mut column_handles = Vec::new();
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+    for (index, (format_type, is_array, raw_value)) in specs.iter().enumerate() {
+        let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
+            id: format!("c{index}"),
+            name: format!("Column {index}"),
+            format_type: (*format_type).to_string(),
+            duckdb_type: logical_type(format_type, *is_array),
+            duckdb_type_alias: String::new(),
+            is_array: *is_array,
+            capabilities: RUST_EXT_COLUMN_EDITABLE,
+        }));
+        column_handles.push(column);
+        columns.push(RustExtWriteColumn {
+            handle: column.cast(),
+            capabilities: RUST_EXT_COLUMN_EDITABLE,
+        });
+        values.push(RustExtInputValue {
+            value_type: RUST_EXT_INPUT_JSON,
+            string_value: alloc_string(raw_value),
+            ..Default::default()
+        });
+    }
+
+    let body: Value = serde_json::from_str(
+        &insert_body(&columns, &values, 1, columns.len(), RUST_EXT_TABLE_INSERT).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "rows": [{
+                "cells": [
+                    {"column": "c0", "value": 10.0},
+                    {"column": "c1", "value": "https://example.com/photo.png"},
+                    {"column": "c2", "value": "ada@example.com"},
+                    {"column": "c3", "value": "https://example.com"},
+                    {"column": "c4", "value": "row-related"},
+                    {"column": "c5", "value": ["One", "Two"]},
+                    {"column": "c6", "value": [12.34, 56.78]},
+                ]
+            }]
+        })
+    );
+
+    for value in values {
+        value.string_value.free();
+    }
+    for column in column_handles {
+        drop(unsafe { Box::from_raw(column) });
+    }
+}
+
+#[test]
+fn mutation_bodies_reject_incomplete_rich_values() {
+    let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
+        id: "c1".to_string(),
+        name: "Image".to_string(),
+        format_type: "image".to_string(),
+        duckdb_type: logical_type("image", false),
+        duckdb_type_alias: String::new(),
+        is_array: false,
+        capabilities: RUST_EXT_COLUMN_EDITABLE,
+    }));
+    let columns = [RustExtWriteColumn {
+        handle: column.cast(),
+        capabilities: RUST_EXT_COLUMN_EDITABLE,
+    }];
+    let value = RustExtInputValue {
+        value_type: RUST_EXT_INPUT_JSON,
+        string_value: alloc_string(r#"{"name":"missing URL"}"#),
+        ..Default::default()
+    };
+    let error = insert_body(&columns, &[value], 1, 1, RUST_EXT_TABLE_INSERT).unwrap_err();
+    assert_eq!(error, "image value is missing its writable field");
+    value.string_value.free();
+    drop(unsafe { Box::from_raw(column) });
+}
+
+#[test]
 fn equality_query_uses_json_literal() {
     let value = RustExtInputValue {
         value_type: 5,
@@ -827,7 +938,7 @@ fn duckdb_mock_superhuman_docs_wide_types() {
          WHERE table_catalog = 'superhuman_docs_doc' AND table_schema = 'main' AND table_name = 'Wide Types' \
          ORDER BY ordinal_position;\
          SELECT \"Checkbox\", \"Text\", \"Email\", \"Select\", \
-                \"Number\", \"Percent\", \"Slider\", \"Scale\", \
+                \"Number\", \"Percent\", \"Slider\", \"Progress\", \"Scale\", \
                 \"Date\", \"DateTime\", \"Time\", epoch(\"Duration\"), \
                 \"Currency\".currency, \"Currency\".amount, \
                 \"Image\".name, \"Image\".url, \"Image\".height, \"Image\".width, \"Image\".status, \
@@ -837,7 +948,18 @@ fn duckdb_mock_superhuman_docs_wide_types() {
                 CAST(\"Other\" AS VARCHAR), CAST(\"MultiSelect\" AS VARCHAR), \
                 list_transform(\"Durations\", value -> epoch(value)), \
                 list_transform(\"Currencies\", value -> value.currency), CAST(\"Others\" AS VARCHAR) \
-         FROM {table};",
+         FROM {table};
+         INSERT INTO {table} (\"Number\", \"Percent\", \"Slider\", \"Progress\", \"Scale\", \"Currency\", \"Image\", \"Person\", \"Hyperlink\", \"Lookup\", \"MultiSelect\", \"Currencies\")
+         VALUES (
+             123.45, 0.6667, 25, 0.4, 4,
+             struct_pack(currency := 'EUR', amount := 10.0),
+             struct_pack(name := 'photo.png', url := 'https://example.com/photo.png', height := 480, width := 640, status := 'live'),
+             struct_pack(name := 'Ada Lovelace', email := 'ada@example.com'),
+             struct_pack(name := 'Example', url := 'https://example.com'),
+             struct_pack(name := 'Referenced row', url := 'https://coda.io/row', tableId := 'tbl-related', tableUrl := 'https://coda.io/table', rowId := 'row-related'),
+             ['One', 'Two'],
+             [struct_pack(currency := 'USD', amount := 12.34), struct_pack(currency := 'EUR', amount := 56.78)]
+         );",
         sql_literal(extension_path()),
         sql_literal(&server.base_url()),
     );
@@ -850,6 +972,7 @@ fn duckdb_mock_superhuman_docs_wide_types() {
         "Number,\"DECIMAL(38,20)\"",
         "Percent,\"DECIMAL(38,20)\"",
         "Slider,\"DECIMAL(38,20)\"",
+        "Progress,\"DECIMAL(38,20)\"",
         "Scale,\"DECIMAL(38,20)\"",
         "Date,DATE",
         "DateTime,TIMESTAMP WITH TIME ZONE",
@@ -888,6 +1011,39 @@ fn duckdb_mock_superhuman_docs_wide_types() {
                 && request.query.contains("valueFormat=rich")
         }),
         "wide table scan did not request rich values"
+    );
+    let request = server
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.method == "POST" && request.path == "/docs/mock-doc/tables/tbl_wide/rows"
+        })
+        .expect("wide table insert was not sent");
+    assert!(request.query.contains("disableParsing=false"));
+    let decimal = |value| serde_json::from_str::<Value>(value).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&request.body).unwrap(),
+        json!({
+            "rows": [{
+                "cells": [
+                    {"column": "c_number", "value": decimal("123.45000000000000000000")},
+                    {"column": "c_percent", "value": decimal("0.66670000000000000000")},
+                    {"column": "c_slider", "value": decimal("25.00000000000000000000")},
+                    {"column": "c_progress", "value": decimal("0.40000000000000000000")},
+                    {"column": "c_scale", "value": decimal("4.00000000000000000000")},
+                    {"column": "c_currency", "value": decimal("10.00000000000000000000")},
+                    {"column": "c_image", "value": "https://example.com/photo.png"},
+                    {"column": "c_person", "value": "ada@example.com"},
+                    {"column": "c_hyperlink", "value": "https://example.com"},
+                    {"column": "c_lookup", "value": "row-related"},
+                    {"column": "c_multiselect", "value": ["One", "Two"]},
+                    {"column": "c_currencies", "value": [
+                        decimal("12.34000000000000000000"),
+                        decimal("56.78000000000000000000")
+                    ]},
+                ]
+            }]
+        })
     );
 }
 
@@ -1256,6 +1412,7 @@ fn mock_response(
                     {"id": "c_number", "name": "Number", "calculated": false, "format": {"type": "number", "isArray": false}},
                     {"id": "c_percent", "name": "Percent", "calculated": false, "format": {"type": "percent", "isArray": false}},
                     {"id": "c_slider", "name": "Slider", "calculated": false, "format": {"type": "slider", "isArray": false}},
+                    {"id": "c_progress", "name": "Progress", "calculated": false, "format": {"type": "slider", "isArray": false, "displayType": "progress"}},
                     {"id": "c_scale", "name": "Scale", "calculated": false, "format": {"type": "scale", "isArray": false}},
                     {"id": "c_date", "name": "Date", "calculated": false, "format": {"type": "date", "isArray": false}},
                     {"id": "c_datetime", "name": "DateTime", "calculated": false, "format": {"type": "dateTime", "isArray": false}},
@@ -1294,6 +1451,11 @@ fn mock_response(
                 json!({"requestId": request_id, "addedRowIds": ["new-row"]}).to_string(),
             )
         }
+        ("POST", "/docs/mock-doc/tables/tbl_wide/rows") => (
+            "202 Accepted",
+            json!({"requestId": "wide-insert-request", "addedRowIds": ["wide-new-row"]})
+                .to_string(),
+        ),
         ("PUT", "/docs/mock-doc/tables/tbl1/rows/r1") => (
             "202 Accepted",
             json!({"requestId": "update-request", "id": "r1"}).to_string(),
@@ -1340,6 +1502,7 @@ fn mock_wide_rows_response(query: &str) -> String {
                 "c_number": precise_number,
                 "c_percent": 0.125,
                 "c_slider": 42,
+                "c_progress": 0.4,
                 "c_scale": 5,
                 "c_date": "2024-01-02",
                 "c_datetime": "2024-01-02T03:04:05Z",

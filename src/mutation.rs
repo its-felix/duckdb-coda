@@ -116,16 +116,74 @@ fn wait_for_mutation(
     )
 }
 
-pub(crate) fn input_value_json(value: RustExtInputValue) -> Value {
+pub(crate) fn input_value_json(value: RustExtInputValue) -> Result<Value, String> {
     match value.value_type {
-        0 => Value::Null,
-        1 => Value::Bool(value.bool_value),
-        2 => json!(value.int_value),
-        3 => json!(value.uint_value),
-        4 => json!(value.double_value),
-        5 => Value::String(value.string_value.as_str().to_string()),
-        _ => Value::Null,
+        0 => Ok(Value::Null),
+        1 => Ok(Value::Bool(value.bool_value)),
+        2 => Ok(json!(value.int_value)),
+        3 => Ok(json!(value.uint_value)),
+        4 => Ok(json!(value.double_value)),
+        5 => Ok(Value::String(value.string_value.as_str().to_string())),
+        RUST_EXT_INPUT_JSON => serde_json::from_str(value.string_value.as_str())
+            .map_err(|error| format!("invalid composite DuckDB value: {error}")),
+        _ => Err(format!(
+            "unsupported DuckDB input value type: {}",
+            value.value_type
+        )),
     }
+}
+
+fn object_field(value: &Value, fields: &[&str]) -> Option<Value> {
+    let object = value.as_object()?;
+    fields
+        .iter()
+        .filter_map(|field| object.get(*field))
+        .find(|field| !field.is_null() && field.as_str() != Some(""))
+        .cloned()
+}
+
+fn simple_cell_value(format_type: &str, value: &Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Err("Superhuman Docs cell arrays cannot contain NULL".to_string());
+    }
+    let normalized_type = format_type.to_ascii_lowercase();
+    let simple = match normalized_type.as_str() {
+        // The rows API accepts only primitive values (or arrays of primitives) for edits.
+        // Rich JSON-LD objects are a read representation and must be reduced to the
+        // primitive that the destination column parser understands.
+        "currency" => object_field(value, &["amount"]),
+        "image" => object_field(value, &["url"]),
+        "person" => object_field(value, &["email", "name"]),
+        "link" | "hyperlink" => object_field(value, &["url"]),
+        "lookup" => object_field(value, &["rowId", "name"]),
+        _ => Some(value.clone()),
+    }
+    .ok_or_else(|| format!("{format_type} value is missing its writable field"))?;
+
+    if simple.is_object() || simple.is_array() || simple.is_null() {
+        return Err(format!(
+            "{format_type} values cannot be serialized to a Superhuman Docs cell primitive"
+        ));
+    }
+    Ok(simple)
+}
+
+fn cell_value_json(
+    column: &crate::model::SuperhumanDocsColumn,
+    value: RustExtInputValue,
+) -> Result<Value, String> {
+    let value = input_value_json(value)?;
+    if column.is_array {
+        let values = value
+            .as_array()
+            .ok_or_else(|| format!("{} expects an array value, received {}", column.name, value))?;
+        return values
+            .iter()
+            .map(|value| simple_cell_value(&column.format_type, value))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array);
+    }
+    simple_cell_value(&column.format_type, &value)
 }
 
 pub(crate) fn write_cells(
@@ -147,7 +205,7 @@ pub(crate) fn write_cells(
         let column = column_from_handle(column.handle)?;
         cells.push(json!({
             "column": column.id,
-            "value": input_value_json(*value),
+            "value": cell_value_json(column, *value)?,
         }));
     }
     Ok(json!({ "cells": cells }))
@@ -299,7 +357,7 @@ pub(crate) fn build_equality_query(
     if value.value_type == 0 {
         return Err("null query value".to_string());
     }
-    let literal = input_value_json(value).to_string();
+    let literal = input_value_json(value)?.to_string();
     let description = match value.value_type {
         1 => value.bool_value.to_string(),
         2 => value.int_value.to_string(),

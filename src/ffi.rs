@@ -3,6 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 pub(crate) const RUST_EXT_INPUT_NULL: u8 = 0;
+pub(crate) const RUST_EXT_INPUT_JSON: u8 = 6;
 
 pub(crate) const RUST_EXT_COLUMN_GENERATED: u32 = 1 << 0;
 pub(crate) const RUST_EXT_COLUMN_SYSTEM: u32 = 1 << 1;
