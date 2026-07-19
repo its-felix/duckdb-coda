@@ -202,7 +202,7 @@ empty.
 - Explicit DuckDB transactions are not supported for attached Superhuman Docs databases. Use autocommit statements so the extension
   does not imply rollback semantics that Superhuman Docs cannot provide.
 - Unsupported Superhuman Docs values use DuckDB's `JSON` type; all array-valued columns preserve their mapped inner type.
-- API routing and request construction use the `superhuman-docs` Rust SDK resource clients at tag `v0.3.0`; the extension
+- API routing and request construction use the `superhuman-docs` Rust SDK resource clients at tag `v0.4.0`; the extension
   supplies a custom transport for authentication, connection reuse, and raw Superhuman Docs value compatibility.
 
 ### Rust bridge boundary

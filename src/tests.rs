@@ -733,9 +733,7 @@ fn duckdb_mock_superhuman_docs_scan_metadata_and_dml() {
     assert!(
         requests.iter().any(|request| request.method == "PUT"
             && request.path == "/docs/mock-doc/tables/tbl1/rows/r1"
-            && request
-                .body
-                .contains("\"value\":\"4.50000000000000000000\"")),
+            && request.body.contains("\"value\":4.50000000000000000000")),
         "expected update request, got {requests:#?}"
     );
     assert!(

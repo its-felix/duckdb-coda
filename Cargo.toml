@@ -9,7 +9,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-superhuman-docs = { git = "https://github.com/its-felix/superhuman-docs-sdk.git", tag = "v0.3.0" }
+superhuman-docs = { git = "https://github.com/its-felix/superhuman-docs-sdk.git", tag = "v0.4.0" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
