@@ -1,17 +1,26 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 
-use serde_json::Value;
 use superhuman_docs::operations;
 use superhuman_docs::DEFAULT_BASE_URL;
 
 use crate::constants::{
-    ALLOW_MUTATION_WARNINGS_OPTION, API_BASE_OPTION, ATTACH_RESOURCE_PREFIXES,
-    INCLUDE_ROW_METADATA_OPTION, MUTATION_TIMEOUT_SECONDS_OPTION, SECRET_SCOPE_PREFIX, SECRET_TYPE,
-    TOKEN_ENV_OPTION, TOKEN_OPTION, WAIT_FOR_MUTATIONS_OPTION,
+    ALLOW_MUTATION_WARNINGS_OPTION, API_BASE_OPTION, INCLUDE_ROW_METADATA_OPTION,
+    MUTATION_TIMEOUT_SECONDS_OPTION, SECRET_SCOPE_PREFIX, TOKEN_ENV_OPTION, TOKEN_OPTION,
+    WAIT_FOR_MUTATIONS_OPTION,
 };
 use crate::ffi::*;
 use crate::model::SuperhumanDocsClientConfig;
 use crate::sdk::{normalize_api_base, SdkClient};
+
+mod host;
+mod resource;
+
+pub(crate) use host::read_environment_variable;
+use host::{owned_option, owned_secret};
+pub(crate) use resource::{
+    doc_id_from_browser_url, doc_id_from_resolved_link, is_browser_url,
+    strip_attach_resource_prefix,
+};
 
 const DEFAULT_MUTATION_TIMEOUT_SECONDS: u64 = 60;
 
@@ -35,67 +44,6 @@ fn parse_mutation_timeout(value: &str) -> Result<u64, String> {
         return Err("MUTATION_TIMEOUT_SECONDS must be a positive integer".to_string());
     }
     Ok(seconds)
-}
-
-pub(crate) fn is_browser_url(value: &str) -> bool {
-    value.starts_with("https://") || value.starts_with("http://")
-}
-
-pub(crate) fn strip_attach_resource_prefix(value: &str) -> &str {
-    ATTACH_RESOURCE_PREFIXES
-        .iter()
-        .find_map(|prefix| value.strip_prefix(prefix))
-        .unwrap_or(value)
-}
-
-pub(crate) fn doc_id_from_browser_url(value: &str) -> Option<String> {
-    let path_start = value.find("://").map(|index| index + 3)?;
-    let path = &value[path_start..];
-    let path = path.find('/').map(|index| &path[index..])?;
-    let doc_segment = path.strip_prefix("/d/")?.split(['/', '?', '#']).next()?;
-    let marker = doc_segment.rfind("_d")?;
-    let doc_id = &doc_segment[marker + 2..];
-    (!doc_id.is_empty()).then(|| doc_id.to_string())
-}
-
-pub(crate) fn doc_id_from_resolved_link(body: &str) -> Result<String, String> {
-    let root: Value = serde_json::from_str(body)
-        .map_err(|error| format!("invalid ResolveBrowserLink response: {error}"))?;
-    let resource = root
-        .get("resource")
-        .and_then(Value::as_object)
-        .ok_or("ResolveBrowserLink response did not contain a resource")?;
-    let resource_type = resource
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or("ResolveBrowserLink resource did not contain a type")?;
-    if resource_type.eq_ignore_ascii_case("doc") {
-        return resource
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .ok_or_else(|| "resolved doc resource did not contain an id".to_string());
-    }
-
-    let href = resource
-        .get("href")
-        .and_then(Value::as_str)
-        .ok_or("resolved resource did not contain an API link")?;
-    let marker = "/docs/";
-    let start = href
-        .find(marker)
-        .map(|index| index + marker.len())
-        .ok_or_else(|| {
-            format!("resolved {resource_type} resource is not contained by a document")
-        })?;
-    let doc_id = href[start..].split(['/', '?', '#']).next().unwrap_or("");
-    if doc_id.is_empty() {
-        return Err(format!(
-            "resolved {resource_type} resource API link did not contain a document id"
-        ));
-    }
-    Ok(doc_id.to_string())
 }
 
 pub(crate) fn resolve_attach(
@@ -261,81 +209,5 @@ fn resolve_stored_credential(
         Err("missing credential".to_string())
     } else {
         Ok(value)
-    }
-}
-
-fn owned_option(
-    host: *const RustExtAttachHost,
-    userdata: *mut c_void,
-    name: *const c_char,
-) -> Result<String, String> {
-    let value = get_option(host, userdata, name)?;
-    let owned = value.as_str().to_string();
-    value.free();
-    Ok(owned)
-}
-
-fn owned_secret(
-    host: *const RustExtAttachHost,
-    userdata: *mut c_void,
-    scope: RustExtString,
-) -> Result<String, String> {
-    let value = lookup_secret(host, userdata, scope)?;
-    let owned = value.as_str().to_string();
-    value.free();
-    Ok(owned)
-}
-
-pub(crate) fn read_environment_variable(name: &str) -> Result<String, String> {
-    std::env::var(name)
-        .map_err(|error| format!("failed to read environment variable {name}: {error}"))
-}
-
-pub(crate) fn get_option(
-    host: *const RustExtAttachHost,
-    userdata: *mut c_void,
-    name: *const c_char,
-) -> Result<RustExtString, String> {
-    let host = RustExtAttachHost::from_ptr(host)?;
-    let mut out = RustExtString::default();
-    let mut err = RustExtError::default();
-    if host.get_option(userdata, name, &mut out, &mut err) {
-        Ok(out)
-    } else {
-        let message = err.message.as_str().to_string();
-        err.message.free();
-        Err(if message.is_empty() {
-            "host attach option failed".to_string()
-        } else {
-            message
-        })
-    }
-}
-
-pub(crate) fn lookup_secret(
-    host: *const RustExtAttachHost,
-    userdata: *mut c_void,
-    scope: RustExtString,
-) -> Result<RustExtString, String> {
-    let host = RustExtAttachHost::from_ptr(host)?;
-    let mut out = RustExtString::default();
-    let mut err = RustExtError::default();
-    if host.lookup_secret(
-        userdata,
-        scope,
-        SECRET_TYPE.as_ptr().cast(),
-        TOKEN_OPTION.as_ptr().cast(),
-        &mut out,
-        &mut err,
-    ) {
-        Ok(out)
-    } else {
-        let message = err.message.as_str().to_string();
-        err.message.free();
-        Err(if message.is_empty() {
-            "host secret lookup failed".to_string()
-        } else {
-            message
-        })
     }
 }

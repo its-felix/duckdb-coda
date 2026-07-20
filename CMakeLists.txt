@@ -70,10 +70,15 @@ add_custom_target(rust_extension_build DEPENDS "${RUST_EXTENSION_LIB}")
 
 set(EXTENSION_SOURCES
     src/cpp/rust_bridge_client.cpp
+    src/cpp/rust_bridge_client_dml.cpp
     src/cpp/rust_bridge_extension.cpp
     src/cpp/rust_bridge_scan.cpp
+    src/cpp/rust_bridge_scan_planning.cpp
+    src/cpp/rust_bridge_secret.cpp
     src/cpp/rust_bridge_storage.cpp
+    src/cpp/rust_bridge_value.cpp
     src/cpp/storage/rust_bridge_catalog.cpp
+    src/cpp/storage/rust_bridge_catalog_planning.cpp
     src/cpp/storage/rust_bridge_dml.cpp
     src/cpp/storage/rust_bridge_schema.cpp
     src/cpp/storage/rust_bridge_table.cpp

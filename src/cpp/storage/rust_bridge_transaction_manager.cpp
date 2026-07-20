@@ -2,9 +2,21 @@
 
 #include "rust_bridge_extension.h"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
+
+void RustBridgeRejectExplicitTransaction(ClientContext &context) {
+	if (rust_ext_supports_explicit_transactions()) {
+		return;
+	}
+	auto query = StringUtil::Lower(context.GetCurrentQuery());
+	if (!context.transaction.IsAutoCommit() || query.find("begin") != string::npos ||
+	    query.find("rollback") != string::npos || query.find("commit") != string::npos) {
+		throw NotImplementedException("%s", rust_ext_explicit_transaction_not_supported_message());
+	}
+}
 
 RustBridgeTransaction::RustBridgeTransaction(TransactionManager &manager, ClientContext &context)
     : Transaction(manager, context) {

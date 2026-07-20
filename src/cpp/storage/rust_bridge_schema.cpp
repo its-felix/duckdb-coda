@@ -1,5 +1,6 @@
 #include "storage/rust_bridge_schema.hpp"
 
+#include "rust_bridge_client_resources.hpp"
 #include "rust_bridge_string.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"

@@ -7,6 +7,7 @@
 namespace duckdb {
 
 class RustBridgeCatalog;
+class RustBridgeCatalogResponse;
 
 class RustBridgeSchemaCatalogEntry : public SchemaCatalogEntry {
 public:

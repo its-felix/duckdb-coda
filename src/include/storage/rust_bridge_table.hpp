@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rust_bridge_client.hpp"
+#include "rust_bridge_types.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 namespace duckdb {

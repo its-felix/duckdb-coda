@@ -4,6 +4,8 @@
 
 namespace duckdb {
 
+void RustBridgeRejectExplicitTransaction(ClientContext &context);
+
 class RustBridgeTransaction : public Transaction {
 public:
 	RustBridgeTransaction(TransactionManager &manager, ClientContext &context);
