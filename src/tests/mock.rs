@@ -44,7 +44,7 @@ fn duckdb_mock_superhuman_docs_scan_metadata_and_dml() {
     assert!(
         requests.iter().any(|request| request.method == "PUT"
             && request.path == "/docs/mock-doc/tables/tbl1/rows/r1"
-            && request.body.contains("\"value\":4.50000000000000000000")),
+            && request.body.contains("\"value\":4.5")),
         "expected update request, got {requests:#?}"
     );
     assert!(
@@ -329,27 +329,24 @@ fn duckdb_mock_superhuman_docs_wide_types() {
         })
         .expect("wide table insert was not sent");
     assert!(request.query.contains("disableParsing=false"));
-    let decimal = |value| serde_json::from_str::<Value>(value).unwrap();
+    let number = |value| serde_json::from_str::<Value>(value).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&request.body).unwrap(),
         json!({
             "rows": [{
                 "cells": [
-                    {"column": "c_number", "value": decimal("123.45000000000000000000")},
-                    {"column": "c_percent", "value": decimal("0.66670000000000000000")},
-                    {"column": "c_slider", "value": decimal("25.00000000000000000000")},
-                    {"column": "c_progress", "value": decimal("0.40000000000000000000")},
-                    {"column": "c_scale", "value": decimal("4.00000000000000000000")},
-                    {"column": "c_currency", "value": decimal("10.00000000000000000000")},
+                    {"column": "c_number", "value": number("123.45")},
+                    {"column": "c_percent", "value": number("0.6667")},
+                    {"column": "c_slider", "value": number("25.0")},
+                    {"column": "c_progress", "value": number("0.4")},
+                    {"column": "c_scale", "value": number("4.0")},
+                    {"column": "c_currency", "value": number("10.0")},
                     {"column": "c_image", "value": "https://example.com/photo.png"},
                     {"column": "c_person", "value": "ada@example.com"},
                     {"column": "c_hyperlink", "value": "https://example.com"},
                     {"column": "c_lookup", "value": "row-related"},
                     {"column": "c_multiselect", "value": ["One", "Two"]},
-                    {"column": "c_currencies", "value": [
-                        decimal("12.34000000000000000000"),
-                        decimal("56.78000000000000000000")
-                    ]},
+                    {"column": "c_currencies", "value": [number("12.34"), number("56.78")]},
                 ]
             }]
         })

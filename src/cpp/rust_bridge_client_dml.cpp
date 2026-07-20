@@ -45,8 +45,8 @@ idx_t RustBridgeClient::InsertRows(const RustBridgeTableInfo &table, DataChunk &
 }
 
 idx_t RustBridgeClient::UpdateRows(const RustBridgeTableInfo &table, DataChunk &chunk,
-	                                 const vector<PhysicalIndex> &columns,
-	                                 const vector<unique_ptr<Expression>> &expressions) {
+                                   const vector<PhysicalIndex> &columns,
+                                   const vector<unique_ptr<Expression>> &expressions) {
 	auto row_id_index = chunk.ColumnCount() - 1;
 	vector<string> row_ids;
 	vector<RustExtString> rust_bridge_row_ids;

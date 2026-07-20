@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use superhuman_docs::operations;
 
 use crate::ffi::*;
 use crate::model::column_from_handle;
@@ -55,10 +56,26 @@ fn simple_cell_value(format_type: &str, value: &Value) -> Result<Value, String> 
     Ok(simple)
 }
 
-fn cell_value_json(
+fn scalar_value(value: Value) -> Result<operations::ScalarValue, String> {
+    match value {
+        Value::Bool(value) => Ok(operations::ScalarValue::Boolean(value)),
+        Value::Number(value) => value
+            .as_f64()
+            .map(operations::ScalarValue::Number)
+            .ok_or_else(|| {
+                format!("number cannot be represented by the Superhuman Docs SDK: {value}")
+            }),
+        Value::String(value) => Ok(operations::ScalarValue::Text(value)),
+        value => Err(format!(
+            "Superhuman Docs cell values must be strings, numbers, or booleans, received {value}"
+        )),
+    }
+}
+
+fn cell_value(
     column: &crate::model::SuperhumanDocsColumn,
     value: RustExtInputValue,
-) -> Result<Value, String> {
+) -> Result<operations::Value, String> {
     let value = input_value_json(value)?;
     if column.is_array {
         let values = value
@@ -67,17 +84,18 @@ fn cell_value_json(
         return values
             .iter()
             .map(|value| simple_cell_value(&column.format_type, value))
+            .map(|value| value.and_then(scalar_value))
             .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array);
+            .map(operations::Value::FlatList);
     }
-    simple_cell_value(&column.format_type, &value)
+    scalar_value(simple_cell_value(&column.format_type, &value)?).map(operations::Value::Scalar)
 }
 
 fn write_cells(
     columns: &[RustExtWriteColumn],
     values: &[RustExtInputValue],
     omit_nulls: bool,
-) -> Result<Value, String> {
+) -> Result<operations::RowEdit, String> {
     let mut cells = Vec::new();
     for (column, value) in columns.iter().zip(values.iter()) {
         if column.capabilities & RUST_EXT_COLUMN_EDITABLE == 0 {
@@ -90,21 +108,21 @@ fn write_cells(
             return Err("Superhuman Docs does not support updating a cell to NULL".to_string());
         }
         let column = column_from_handle(column.handle)?;
-        cells.push(json!({
-            "column": column.id,
-            "value": cell_value_json(column, *value)?,
-        }));
+        cells.push(operations::CellEdit {
+            column: column.id.clone(),
+            value: cell_value(column, *value)?,
+        });
     }
-    Ok(json!({ "cells": cells }))
+    Ok(operations::RowEdit { cells })
 }
 
-pub(crate) fn insert_body(
+pub(crate) fn insert_payload(
     columns: &[RustExtWriteColumn],
     values: &[RustExtInputValue],
     row_count: usize,
     value_column_count: usize,
     table_capabilities: u32,
-) -> Result<String, String> {
+) -> Result<operations::RowsUpsert, String> {
     if table_capabilities & RUST_EXT_TABLE_INSERT == 0 {
         return Err("insert is unsupported for this table".to_string());
     }
@@ -120,21 +138,26 @@ pub(crate) fn insert_body(
             true,
         )?);
     }
-    Ok(json!({ "rows": rows }).to_string())
+    Ok(operations::RowsUpsert {
+        rows,
+        key_columns: None,
+    })
 }
 
-pub(crate) fn update_body(
+pub(crate) fn update_payload(
     columns: &[RustExtWriteColumn],
     values: &[RustExtInputValue],
     table_capabilities: u32,
-) -> Result<String, String> {
+) -> Result<operations::RowUpdate, String> {
     if table_capabilities & RUST_EXT_TABLE_UPDATE == 0 {
         return Err("update is unsupported for this table".to_string());
     }
     if columns.len() != values.len() {
         return Err("invalid update value shape".to_string());
     }
-    Ok(json!({ "row": write_cells(columns, values, false)? }).to_string())
+    Ok(operations::RowUpdate {
+        row: write_cells(columns, values, false)?,
+    })
 }
 
 pub(crate) fn build_equality_query(

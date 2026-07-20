@@ -55,16 +55,7 @@ impl SdkClient {
         &self,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
     ) -> Result<String, String> {
-        self.execute_inner(None, None, operation)?
-            .ok_or_else(|| "SDK transport returned an unexpected accepted status".to_string())
-    }
-
-    pub(crate) fn execute_with_body<T>(
-        &self,
-        body: String,
-        operation: impl FnOnce(&Client) -> Result<T, Error>,
-    ) -> Result<String, String> {
-        self.execute_inner(Some(body.into_bytes()), None, operation)?
+        self.execute_inner(None, operation)?
             .ok_or_else(|| "SDK transport returned an unexpected accepted status".to_string())
     }
 
@@ -73,12 +64,11 @@ impl SdkClient {
         accepted_status: u16,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
     ) -> Result<Option<String>, String> {
-        self.execute_inner(None, Some(accepted_status), operation)
+        self.execute_inner(Some(accepted_status), operation)
     }
 
     fn execute_inner<T>(
         &self,
-        body_override: Option<Vec<u8>>,
         accepted_status: Option<u16>,
         operation: impl FnOnce(&Client) -> Result<T, Error>,
     ) -> Result<Option<String>, String> {
@@ -92,7 +82,6 @@ impl SdkClient {
                 .lock()
                 .map_err(|_| "HTTP transport state lock poisoned".to_string())?;
             state.exchange = None;
-            state.body_override = body_override;
         }
 
         let result = operation(&self.client);
@@ -101,7 +90,6 @@ impl SdkClient {
                 .state
                 .lock()
                 .map_err(|_| "HTTP transport state lock poisoned".to_string())?;
-            state.body_override = None;
             state.exchange.take()
         };
 

@@ -89,19 +89,8 @@ pub(super) fn create_page_with_html(
     page_name: &str,
     html: String,
 ) -> Result<Value, String> {
-    let payload = json!({
-        "name": page_name,
-        "pageContent": {
-            "type": "canvas",
-            "canvasContent": {
-                "format": "html",
-                "content": html,
-            },
-        },
-    })
-    .to_string();
     let sdk = SdkClient::at(endpoint, credential)?;
-    let body = sdk.execute_with_body(payload, |client| {
+    let body = sdk.execute(|client| {
         client.docs().pages().create(operations::CreatePageInput {
             doc_id: resource.to_string(),
             payload: operations::PageCreate {
@@ -110,7 +99,15 @@ pub(super) fn create_page_with_html(
                 icon_name: None,
                 image_url: None,
                 parent_page_id: None,
-                page_content: None,
+                page_content: Some(operations::PageCreateContent::Canvas(
+                    operations::PageCreateCanvasContent {
+                        type_: operations::PageType::Canvas,
+                        canvas_content: operations::PageContent {
+                            format: operations::PageContentFormat::Html,
+                            content: html,
+                        },
+                    },
+                )),
             },
         })
     })?;

@@ -7,7 +7,7 @@ use crate::json::{column_list_from_json, logical_type, logical_type_alias, rows_
 use crate::model::{
     SuperhumanDocsCell, SuperhumanDocsClientConfig, SuperhumanDocsColumn, SuperhumanDocsRow,
 };
-use crate::mutation::{build_equality_query, insert_body, update_body};
+use crate::mutation::{build_equality_query, insert_payload, update_payload};
 use crate::scan::scan_value;
 use crate::sdk::{validate_token_at, SdkClient};
 use crate::secret::{create_secret, free_secret};

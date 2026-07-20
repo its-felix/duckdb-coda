@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn mutation_bodies_match_previous_shape() {
+fn mutation_payloads_use_sdk_types() {
     let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
         id: "c1".to_string(),
         name: "Column".to_string(),
@@ -33,11 +33,21 @@ fn mutation_bodies_match_previous_shape() {
         },
     ];
     assert_eq!(
-        insert_body(&columns, &values, 1, 2, RUST_EXT_TABLE_INSERT).unwrap(),
-        r#"{"rows":[{"cells":[{"column":"c1","value":"v"}]}]}"#
+        insert_payload(&columns, &values, 1, 2, RUST_EXT_TABLE_INSERT).unwrap(),
+        operations::RowsUpsert {
+            rows: vec![operations::RowEdit {
+                cells: vec![operations::CellEdit {
+                    column: "c1".to_string(),
+                    value: operations::Value::Scalar(operations::ScalarValue::Text(
+                        "v".to_string()
+                    )),
+                }],
+            }],
+            key_columns: None,
+        }
     );
     assert_eq!(
-        update_body(&columns[..1], &values[1..], RUST_EXT_TABLE_UPDATE).unwrap_err(),
+        update_payload(&columns[..1], &values[1..], RUST_EXT_TABLE_UPDATE).unwrap_err(),
         "Superhuman Docs does not support updating a cell to NULL"
     );
     drop(unsafe { Box::from_raw(column) });
@@ -45,7 +55,7 @@ fn mutation_bodies_match_previous_shape() {
 }
 
 #[test]
-fn mutation_bodies_reduce_rich_duckdb_types_to_api_primitives() {
+fn mutation_payloads_reduce_rich_duckdb_types_to_sdk_values() {
     let specs = [
         ("currency", false, r#"{"currency":"EUR","amount":10.0}"#),
         (
@@ -100,10 +110,9 @@ fn mutation_bodies_reduce_rich_duckdb_types_to_api_primitives() {
         });
     }
 
-    let body: Value = serde_json::from_str(
-        &insert_body(&columns, &values, 1, columns.len(), RUST_EXT_TABLE_INSERT).unwrap(),
-    )
-    .unwrap();
+    let payload =
+        insert_payload(&columns, &values, 1, columns.len(), RUST_EXT_TABLE_INSERT).unwrap();
+    let body = serde_json::to_value(payload).unwrap();
     assert_eq!(
         body,
         json!({
@@ -130,7 +139,7 @@ fn mutation_bodies_reduce_rich_duckdb_types_to_api_primitives() {
 }
 
 #[test]
-fn mutation_bodies_reject_incomplete_rich_values() {
+fn mutation_payloads_reject_incomplete_rich_values() {
     let column = Box::into_raw(Box::new(SuperhumanDocsColumn {
         id: "c1".to_string(),
         name: "Image".to_string(),
@@ -149,7 +158,7 @@ fn mutation_bodies_reject_incomplete_rich_values() {
         string_value: alloc_string(r#"{"name":"missing URL"}"#),
         ..Default::default()
     };
-    let error = insert_body(&columns, &[value], 1, 1, RUST_EXT_TABLE_INSERT).unwrap_err();
+    let error = insert_payload(&columns, &[value], 1, 1, RUST_EXT_TABLE_INSERT).unwrap_err();
     assert_eq!(error, "image value is missing its writable field");
     value.string_value.free();
     drop(unsafe { Box::from_raw(column) });

@@ -360,8 +360,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "superhuman-docs"
-version = "0.4.0"
-source = "git+https://github.com/its-felix/superhuman-docs-sdk.git?tag=v0.4.0#5218de8d6ef858fe3b24511ffe3e4de288ee5139"
+version = "0.4.1"
+source = "git+https://github.com/its-felix/superhuman-docs-sdk.git?tag=v0.4.1#3a67271b40f7c041807c9d1d25d8dcb6b9fc8fb7"
 dependencies = [
  "serde",
  "serde_json",

@@ -7,7 +7,7 @@ use crate::sdk::SdkClient;
 mod payload;
 mod status;
 
-pub(crate) use payload::{build_equality_query, insert_body, update_body};
+pub(crate) use payload::{build_equality_query, insert_payload, update_payload};
 use status::wait_for_mutation;
 
 pub(crate) fn insert_rows(
@@ -19,14 +19,14 @@ pub(crate) fn insert_rows(
     value_column_count: usize,
 ) -> Result<usize, String> {
     let sdk = SdkClient::new(config)?;
-    let body = insert_body(
+    let payload = insert_payload(
         columns,
         values,
         row_count,
         value_column_count,
         table.capabilities,
     )?;
-    let response = sdk.execute_with_body(body, |client| {
+    let response = sdk.execute(|client| {
         client
             .tables()
             .rows()
@@ -34,10 +34,7 @@ pub(crate) fn insert_rows(
                 doc_id: config.resource.clone(),
                 table_id_or_name: table.id.clone(),
                 disable_parsing: Some(false),
-                payload: operations::RowsUpsert {
-                    rows: Vec::new(),
-                    key_columns: None,
-                },
+                payload,
             })
     })?;
     wait_for_mutation(&sdk, config, &response)?;
@@ -60,20 +57,18 @@ pub(crate) fn update_rows(
     let sdk = SdkClient::new(config)?;
     for (row_index, row_id) in row_ids.iter().enumerate() {
         let start = row_index * columns.len();
-        let body = update_body(
+        let payload = update_payload(
             columns,
             &values[start..start + columns.len()],
             table.capabilities,
         )?;
-        let response = sdk.execute_with_body(body, |client| {
+        let response = sdk.execute(|client| {
             client.tables().rows().update(operations::UpdateRowInput {
                 doc_id: config.resource.clone(),
                 table_id_or_name: table.id.clone(),
                 row_id_or_name: row_id.as_str().to_string(),
                 disable_parsing: Some(false),
-                payload: operations::RowUpdate {
-                    row: operations::RowEdit { cells: Vec::new() },
-                },
+                payload,
             })
         })?;
         wait_for_mutation(&sdk, config, &response)?;

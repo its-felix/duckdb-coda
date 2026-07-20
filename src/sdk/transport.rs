@@ -12,7 +12,6 @@ pub(super) struct Exchange {
 
 #[derive(Default)]
 pub(super) struct TransportState {
-    pub(super) body_override: Option<Vec<u8>>,
     pub(super) exchange: Option<Exchange>,
 }
 
@@ -32,18 +31,8 @@ impl Transport for HttpTransport {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn send_http_request(transport: &HttpTransport, mut request: Request) -> Result<Response, Error> {
+fn send_http_request(transport: &HttpTransport, request: Request) -> Result<Response, Error> {
     let expected_status = request.expected_status;
-    if let Some(body) = transport
-        .state
-        .lock()
-        .map_err(|_| Error::transport("HTTP transport state lock poisoned"))?
-        .body_override
-        .take()
-    {
-        request.body = Some(body);
-    }
-
     let http_request = transport
         .agent
         .request(request.method.as_str(), &request.url)

@@ -164,4 +164,3 @@ Value RustBridgeDuckDBValue(const RustExtInputValue &value) {
 }
 
 } // namespace duckdb
-
